@@ -768,6 +768,31 @@ async def test_async_unload_flushes_pending_save_immediately(hass):
 # --- start_cycle / end_cycle (issue #13) --------------------------------------------------------
 
 
+async def test_end_cycle_forces_recompute_without_external_event(hass):
+    """#14: si no hubo un evento de estado reciente que dispare un _recompute externo, end_cycle
+    debe seguir dando un delta exacto al momento exacto de la llamada — no depender de cuándo
+    fue el último evento ni del tick de fondo cada 60s."""
+    entry = _make_entry(hass, circuits={"Termo": "sensor.termo_power"})
+    circuit_id = next(iter(entry.subentries))
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})
+    hass.states.async_set("sensor.termo_power", "1000", {"unit_of_measurement": "W"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator.start_cycle(circuit_id, now)  # start_cycle debe forzar el primer recompute solo
+
+    later = now + timedelta(minutes=30)
+    result = coordinator.end_cycle(circuit_id, later)  # sin NINGÚN _recompute externo entre medio
+
+    assert result["cost"] == pytest.approx(0.20 * 0.5)  # 1kW * 0.5h * 0.20€/kWh
+    assert result["energy_kwh"] == pytest.approx(0.5)
+    assert result["duration_seconds"] == 1800
+
+
 async def test_end_cycle_computes_delta_since_start_cycle(hass):
     entry = _make_entry(hass, positive_is_export=True, circuits={"Lavavajillas": "sensor.lavavajillas_power"})
     circuit_id = next(iter(entry.subentries))

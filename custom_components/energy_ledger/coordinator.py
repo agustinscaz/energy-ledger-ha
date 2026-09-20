@@ -244,7 +244,12 @@ class EnergyLedgerCoordinator:
     def start_cycle(self, node_id: str, now: datetime) -> None:
         """Guarda un snapshot de los acumulados "lifetime" de este nodo como marca de inicio de
         ciclo. Llamar de nuevo sin haber cerrado el anterior simplemente pisa la marca — no hace
-        falta soportar ciclos anidados (ver issue #13)."""
+        falta soportar ciclos anidados (ver issue #13).
+
+        _recompute(now) primero (#14): sin esto, la foto podría tener hasta
+        BACKGROUND_UPDATE_INTERVAL_SECONDS de desfasaje si no hubo un evento de estado reciente
+        — llamar al servicio no debería depender de cuándo fue el último tick de fondo."""
+        self._recompute(now)
         node = self.nodes.get(node_id)
         if node is None:
             raise ValueError(f"Nodo desconocido: {node_id}")
@@ -259,7 +264,11 @@ class EnergyLedgerCoordinator:
     def end_cycle(self, node_id: str, now: datetime) -> dict[str, Any]:
         """Delta contra la marca de start_cycle. LookupError si no hay marca previa para este
         nodo — el llamador (services.py) lo traduce a un error de servicio claro en vez de un
-        delta sin sentido contra un mark inexistente."""
+        delta sin sentido contra un mark inexistente.
+
+        _recompute(now) primero (#14), mismo motivo que en start_cycle: la foto de cierre tiene
+        que ser exacta al momento de la llamada, no depender de cuándo fue el último evento."""
+        self._recompute(now)
         node = self.nodes.get(node_id)
         if node is None:
             raise ValueError(f"Nodo desconocido: {node_id}")
