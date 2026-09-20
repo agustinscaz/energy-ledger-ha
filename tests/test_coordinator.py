@@ -3,6 +3,7 @@ persistencia entre reinicios — el núcleo de todo el proyecto (ver README, sec
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -933,3 +934,58 @@ async def test_home_cycle_includes_compensation_and_savings(hass):
     result = coordinator.end_cycle(NODE_HOME, now + timedelta(hours=1))
     assert result["compensation"] == pytest.approx(0.0)  # importando, no exportando
     assert result["savings"] == pytest.approx(0.20 * 2.0)  # autoconsumo = 3-1 = 2kW
+
+
+# --- NaN/Infinity no contaminan los acumulados (issue #15) -------------------------------------
+
+
+async def test_read_float_treats_nan_as_gap_not_as_valid_value(hass):
+    """float("nan") NO lanza ValueError — sin el chequeo explícito, se colaría como número
+    "válido" y, sumado a un PeriodAccumulator, lo deja contaminado con NaN para siempre."""
+    entry = _make_entry(hass)
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    hass.states.async_set(GRID, "nan", {"unit_of_measurement": "W"})
+    assert coordinator._read_float(GRID) is None
+
+
+async def test_read_float_treats_infinity_as_gap_not_as_valid_value(hass):
+    entry = _make_entry(hass)
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    hass.states.async_set(GRID, "inf", {"unit_of_measurement": "W"})
+    assert coordinator._read_float(GRID) is None
+    hass.states.async_set(GRID, "-inf", {"unit_of_measurement": "W"})
+    assert coordinator._read_float(GRID) is None
+
+
+async def test_grid_power_nan_does_not_corrupt_lifetime_accumulator(hass):
+    """El caso que más importa (#13, #15 combinados): un NaN pasajero en grid_power_entity no
+    debe dejar el acumulado lifetime (que nunca resetea) contaminado para siempre."""
+    entry = _make_entry(hass, circuits={"Termo": "sensor.termo_power"})
+    circuit_id = next(iter(entry.subentries))
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})
+    hass.states.async_set("sensor.termo_power", "1000", {"unit_of_measurement": "W"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)
+    coordinator._recompute(now + timedelta(minutes=30))
+    value_before_gap = coordinator.nodes[circuit_id].cost["lifetime"].value
+    assert math.isfinite(value_before_gap)
+
+    hass.states.async_set(GRID, "nan", {"unit_of_measurement": "W"})
+    coordinator._recompute(now + timedelta(minutes=40))  # el hueco se detecta, pero el punto
+    # central es que lo que se sumó (a la última tarifa válida, ver #2) SIGUE siendo finito.
+
+    assert coordinator.data_gap_since is not None
+    assert math.isfinite(coordinator.nodes[circuit_id].cost["lifetime"].value)  # nunca NaN
+
+    hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})
+    coordinator._recompute(now + timedelta(hours=1))  # se recupera solo, sigue acumulando normal
+
+    assert coordinator.data_gap_since is None
+    assert math.isfinite(coordinator.nodes[circuit_id].cost["lifetime"].value)
+    assert coordinator.nodes[circuit_id].cost["lifetime"].value > value_before_gap

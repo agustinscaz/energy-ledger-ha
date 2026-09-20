@@ -10,15 +10,24 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_CIRCUIT_NAME, CONF_CIRCUIT_POWER_ENTITY, SUBENTRY_TYPE_CIRCUIT
+from .const import CONF_CIRCUIT_ENERGY_ENTITY, CONF_CIRCUIT_NAME, CONF_CIRCUIT_POWER_ENTITY, SUBENTRY_TYPE_CIRCUIT
 from .coordinator import EnergyLedgerCoordinator
+
+
+def _circuit_diagnostics(sub_data: dict[str, Any]) -> dict[str, Any]:
+    data = {CONF_CIRCUIT_NAME: sub_data[CONF_CIRCUIT_NAME], CONF_CIRCUIT_POWER_ENTITY: sub_data[CONF_CIRCUIT_POWER_ENTITY]}
+    # Se omite si no está seteado (igual criterio que el resto de campos opcionales, ver #16) en
+    # vez de aparecer como null — faltaba desde que se agregó energy_entity en #7.
+    if sub_data.get(CONF_CIRCUIT_ENERGY_ENTITY):
+        data[CONF_CIRCUIT_ENERGY_ENTITY] = sub_data[CONF_CIRCUIT_ENERGY_ENTITY]
+    return data
 
 
 async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     coordinator: EnergyLedgerCoordinator = entry.runtime_data
 
     circuits = {
-        sub_id: {CONF_CIRCUIT_NAME: sub.data[CONF_CIRCUIT_NAME], CONF_CIRCUIT_POWER_ENTITY: sub.data[CONF_CIRCUIT_POWER_ENTITY]}
+        sub_id: _circuit_diagnostics(sub.data)
         for sub_id, sub in entry.subentries.items()
         if sub.subentry_type == SUBENTRY_TYPE_CIRCUIT
     }

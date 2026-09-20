@@ -14,6 +14,7 @@ depender de que esos helpers restauren bien su estado (no lo hacen siempre) y si
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -547,10 +548,21 @@ class EnergyLedgerCoordinator:
         if state is None or state.state in ("unknown", "unavailable"):
             return None
         try:
-            return float(state.state)
+            value = float(state.state)
         except ValueError:
             _LOGGER.debug("Estado no numérico de %s: %r", entity_id, state.state)
             return None
+        if not math.isfinite(value):
+            # float("nan")/float("inf") NO lanzan ValueError — son conversiones válidas en
+            # Python. Sin este chequeo, un NaN se cuela como "número válido" y contamina para
+            # siempre cualquier PeriodAccumulator al que se sume (nan + lo que sea = nan, no hay
+            # suma futura que lo recupere) — especialmente grave en el acumulado "lifetime"
+            # (#13), que a diferencia de día/semana/mes/año nunca cierra ni se autocorrige en el
+            # próximo corte de calendario. Tratado igual que unknown/unavailable: hueco de datos,
+            # no un valor "válido".
+            _LOGGER.debug("Estado no finito (NaN/Infinity) de %s: %r", entity_id, state.state)
+            return None
+        return value
 
     async def _async_load(self, now: datetime) -> None:
         stored = await self._store.async_load()
