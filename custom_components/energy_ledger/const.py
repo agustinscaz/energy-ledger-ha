@@ -68,3 +68,11 @@ ATTR_DATA_GAP_SINCE = "datos_incompletos_desde"
 ATTR_ENERGY_METHOD = "metodo"
 ENERGY_METHOD_METER = "contador_real"
 ENERGY_METHOD_INTEGRATED = "potencia_integrada"
+
+# Solo en LedgerCostSensor de un CIRCUITO (nunca en el nodo casa/red, que es exacto siempre — ver
+# issue #9): si el coste de este instante repartió el import real entre circuitos concurrentes
+# (con home_load_power_entity) o aplicó el precio completo a la potencia entera del circuito
+# (comportamiento binario original, sobreestima cuando hay más de un circuito activo a la vez).
+ATTR_COST_METHOD = "metodo_coste"
+COST_METHOD_SHARED = "repartido"
+COST_METHOD_UNSHARED = "binario_sin_repartir"

@@ -18,6 +18,8 @@ from custom_components.energy_ledger.const import (
     CONF_HOME_LOAD_POWER_ENTITY,
     CONF_POSITIVE_IS_EXPORT,
     CONF_SELL_PRICE_ENTITY,
+    COST_METHOD_SHARED,
+    COST_METHOD_UNSHARED,
     DOMAIN,
     ENERGY_METHOD_INTEGRATED,
     ENERGY_METHOD_METER,
@@ -595,3 +597,93 @@ async def test_last_raw_energy_survives_restart(hass):
     restarted._recompute(later + timedelta(minutes=1))
 
     assert restarted.nodes[circuit_id].energy["day"].value == pytest.approx(0.3)
+
+
+# --- Reparto de coste entre circuitos concurrentes (issue #9) ---------------------------------
+
+
+async def test_circuit_cost_shared_never_exceeds_home_cost_with_concurrent_circuits(hass):
+    """El caso del issue: 3 circuitos de 2kW cada uno (6kW de carga total) pero la casa solo
+    importa 50W de red — sin repartir, cada circuito se cobraría el precio completo por sus 2kW
+    enteros (24x sobreestimación entre los 3). Repartiendo, la suma nunca supera el coste real."""
+    entry = _make_entry(
+        hass,
+        positive_is_export=True,
+        home_load=True,
+        circuits={"Lavavajillas": "sensor.lavavajillas_power", "Termo": "sensor.termo_power", "Vitro": "sensor.vitro_power"},
+    )
+    circuit_ids = list(entry.subentries)
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(GRID, "-50", {"unit_of_measurement": "W"})  # casa importando solo 50W
+    hass.states.async_set(LOAD, "6050", {"unit_of_measurement": "W"})  # 3 * 2kW + 50W del resto
+    for power_entity in ("sensor.lavavajillas_power", "sensor.termo_power", "sensor.vitro_power"):
+        hass.states.async_set(power_entity, "2000", {"unit_of_measurement": "W"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), **{cid: (0.0, 0.0, 0.0) for cid in circuit_ids}}
+    coordinator._last_update = now
+    coordinator._recompute(now)  # fija tarifas, elapsed=0
+    coordinator._recompute(now + timedelta(hours=1))
+
+    home_cost = coordinator.nodes[NODE_HOME].cost["day"].value
+    circuits_total = sum(coordinator.nodes[cid].cost["day"].value for cid in circuit_ids)
+    assert home_cost == pytest.approx(0.05 * 0.20)  # 50W * 1h * 0.20€/kWh
+    assert circuits_total <= home_cost + 1e-9
+    assert coordinator.cost_method(circuit_ids[0]) == COST_METHOD_SHARED
+
+    # Reparto proporcional: cada circuito pesa 2/6.05 del consumo total medido.
+    expected_each = 0.05 * 0.20 * (2.0 / 6.05)
+    for cid in circuit_ids:
+        assert coordinator.nodes[cid].cost["day"].value == pytest.approx(expected_each, rel=1e-3)
+
+
+async def test_circuit_cost_falls_back_to_unshared_without_home_load_power_entity(hass):
+    """Sin home_load_power_entity, se mantiene el comportamiento binario original (conocido,
+    puede sobreestimar) — no rompe instalaciones que no configuraron el campo opcional."""
+    entry = _make_entry(hass, positive_is_export=True, circuits={"Termo": "sensor.termo_power"})
+    circuit_id = next(iter(entry.subentries))
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(GRID, "-50", {"unit_of_measurement": "W"})
+    hass.states.async_set("sensor.termo_power", "2000", {"unit_of_measurement": "W"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)
+    coordinator._recompute(now + timedelta(hours=1))
+
+    # Precio completo (0.20) por los 2kW enteros del circuito, no por los 50W reales de import.
+    assert coordinator.nodes[circuit_id].cost["day"].value == pytest.approx(2.0 * 0.20)
+    assert coordinator.cost_method(circuit_id) == COST_METHOD_UNSHARED
+
+
+async def test_circuit_cost_falls_back_to_unshared_when_load_sensor_reads_zero(hass):
+    """load_kw <= 0 (sensor disponible pero en 0, o midiendo menos que el propio circuito por
+    ruido) también cae al binario en vez de dividir por 0 / dar un reparto sin sentido."""
+    entry = _make_entry(hass, positive_is_export=True, home_load=True, circuits={"Termo": "sensor.termo_power"})
+    circuit_id = next(iter(entry.subentries))
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(GRID, "-50", {"unit_of_measurement": "W"})
+    hass.states.async_set(LOAD, "0", {"unit_of_measurement": "W"})
+    hass.states.async_set("sensor.termo_power", "2000", {"unit_of_measurement": "W"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)
+    coordinator._recompute(now + timedelta(hours=1))
+
+    assert coordinator.cost_method(circuit_id) == COST_METHOD_UNSHARED
+    assert coordinator.nodes[circuit_id].cost["day"].value == pytest.approx(2.0 * 0.20)
+
+
+async def test_cost_method_is_none_for_home_node(hass):
+    entry = _make_entry(hass, home_load=True, circuits={"Termo": "sensor.termo_power"})
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    assert coordinator.cost_method(NODE_HOME) is None

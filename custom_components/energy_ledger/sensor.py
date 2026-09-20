@@ -13,6 +13,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import (
+    ATTR_COST_METHOD,
     ATTR_DATA_GAP_SINCE,
     ATTR_ENERGY_METHOD,
     ATTR_LAST_CLOSED_PERIOD,
@@ -142,6 +143,14 @@ class LedgerCostSensor(_LedgerSensorBase):
     def _period_accumulator(self) -> PeriodAccumulator | None:
         node = self.coordinator.nodes.get(self._node_id)
         return node.cost.get(self._period) if node else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, float | str | None]:
+        attrs = dict(super().extra_state_attributes)
+        method = self.coordinator.cost_method(self._node_id)
+        if method is not None:  # None en el nodo casa/red: no aplica, ver issue #9
+            attrs[ATTR_COST_METHOD] = method
+        return attrs
 
 
 class LedgerEnergySensor(_LedgerSensorBase):
