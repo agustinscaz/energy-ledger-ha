@@ -42,6 +42,7 @@ from .const import (
     ENERGY_METHOD_INTEGRATED,
     ENERGY_METHOD_METER,
     NODE_HOME,
+    PERIOD_LIFETIME,
     PERIODS,
     STORAGE_KEY_PREFIX,
     STORAGE_SAVE_DELAY_SECONDS,
@@ -61,6 +62,10 @@ def _period_start(period: str, now: datetime) -> datetime:
     Nunca una ventana "rolling" (N días hacia atrás) — ese fue precisamente el problema que
     utility_meter dio en producción y que esta integración existe para evitar.
     """
+    if period == PERIOD_LIFETIME:
+        # Constante, no depende de `now`: nunca difiere de sí misma, así que _advance_accumulators
+        # nunca lo trata como un corte de calendario — un acumulado que corre desde siempre.
+        return datetime.min.replace(tzinfo=now.tzinfo)
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if period == "day":
         return midnight
@@ -98,15 +103,21 @@ class PeriodAccumulator:
         )
 
 
+# PERIODS + el pseudo-período lifetime (#13): todo lo que _new_accumulators/_load_accumulators
+# maneja para cada nodo. PERIODS solo (sin lifetime) sigue siendo lo que sensor.py itera para
+# crear sensores — lifetime nunca se expone como sensor propio.
+_ALL_PERIODS = (*PERIODS, PERIOD_LIFETIME)
+
+
 def _new_accumulators(now: datetime) -> dict[str, PeriodAccumulator]:
-    return {period: PeriodAccumulator(period_start=_period_start(period, now)) for period in PERIODS}
+    return {period: PeriodAccumulator(period_start=_period_start(period, now)) for period in _ALL_PERIODS}
 
 
 def _load_accumulators(data: dict[str, Any], now: datetime) -> dict[str, PeriodAccumulator]:
     """Reconstruye un dict de PeriodAccumulator desde storage, completando con acumuladores
     nuevos (valor 0) cualquier período ausente en `data` — ver uso en _async_load."""
-    loaded = {p: PeriodAccumulator.from_dict(d) for p, d in data.items() if p in PERIODS}
-    for period in PERIODS:
+    loaded = {p: PeriodAccumulator.from_dict(d) for p, d in data.items() if p in _ALL_PERIODS}
+    for period in _ALL_PERIODS:
         loaded.setdefault(period, PeriodAccumulator(period_start=_period_start(period, now)))
     return loaded
 
@@ -181,6 +192,12 @@ class EnergyLedgerCoordinator:
         # este gap-tracking, a diferencia de data_gap_since y energy_gap_since que ya lo tienen
         # para sus respectivas fuentes). No persistido, mismo criterio que los otros dos.
         self._savings_gap_since: datetime | None = None
+        # node_id -> marca de start_cycle (ver issue #13): snapshot de los acumulados "lifetime"
+        # de ese nodo al momento de empezar el ciclo, más el timestamp. Persistido en Store — un
+        # ciclo largo (ej. un lavado de 3 horas) no debería perder la marca solo porque HA se
+        # reinició a mitad de camino. Un ciclo que nunca se cierra con end_cycle no causa ningún
+        # problema, solo queda ahí sin usarse; no hace falta expirarlo.
+        self._cycle_marks: dict[str, dict[str, Any]] = {}
         self._listeners: list[Callable[[], None]] = []
         self._unsub_state: Callable[[], None] | None = None
         self._unsub_interval: Callable[[], None] | None = None
@@ -223,6 +240,50 @@ class EnergyLedgerCoordinator:
     @property
     def savings_gap_since(self) -> datetime | None:
         return self._savings_gap_since
+
+    def start_cycle(self, node_id: str, now: datetime) -> None:
+        """Guarda un snapshot de los acumulados "lifetime" de este nodo como marca de inicio de
+        ciclo. Llamar de nuevo sin haber cerrado el anterior simplemente pisa la marca — no hace
+        falta soportar ciclos anidados (ver issue #13)."""
+        node = self.nodes.get(node_id)
+        if node is None:
+            raise ValueError(f"Nodo desconocido: {node_id}")
+        self._cycle_marks[node_id] = {
+            "start_time": now.isoformat(),
+            "cost": node.cost[PERIOD_LIFETIME].value,
+            "energy": node.energy[PERIOD_LIFETIME].value,
+            "compensation": node.compensation[PERIOD_LIFETIME].value if node.compensation is not None else None,
+            "savings": node.savings[PERIOD_LIFETIME].value if node.savings is not None else None,
+        }
+
+    def end_cycle(self, node_id: str, now: datetime) -> dict[str, Any]:
+        """Delta contra la marca de start_cycle. LookupError si no hay marca previa para este
+        nodo — el llamador (services.py) lo traduce a un error de servicio claro en vez de un
+        delta sin sentido contra un mark inexistente."""
+        node = self.nodes.get(node_id)
+        if node is None:
+            raise ValueError(f"Nodo desconocido: {node_id}")
+        mark = self._cycle_marks.pop(node_id, None)
+        if mark is None:
+            raise LookupError(f"No hay un ciclo iniciado (start_cycle) para el nodo {node_id}")
+
+        compensation_delta = None
+        if node.compensation is not None and mark["compensation"] is not None:
+            compensation_delta = round(node.compensation[PERIOD_LIFETIME].value - mark["compensation"], 4)
+        savings_delta = None
+        if node.savings is not None and mark["savings"] is not None:
+            savings_delta = round(node.savings[PERIOD_LIFETIME].value - mark["savings"], 4)
+
+        start_time = dt_util.parse_datetime(mark["start_time"]) or now
+        return {
+            "cost": round(node.cost[PERIOD_LIFETIME].value - mark["cost"], 4),
+            "energy_kwh": round(node.energy[PERIOD_LIFETIME].value - mark["energy"], 4),
+            "compensation": compensation_delta,
+            "savings": savings_delta,
+            "duration_seconds": round((now - start_time).total_seconds()),
+            "cost_method": self.cost_method(node_id),
+            "energy_method": self.energy_method(node_id),
+        }
 
     def _circuit_subentry_ids(self) -> list[str]:
         return [sub_id for sub_id, sub in self.entry.subentries.items() if sub.subentry_type == SUBENTRY_TYPE_CIRCUIT]
@@ -310,6 +371,7 @@ class EnergyLedgerCoordinator:
                 self._last_raw_energy.pop(node_id, None)
                 self._energy_gap_since.pop(node_id, None)
                 self._last_cost_method.pop(node_id, None)
+                self._cycle_marks.pop(node_id, None)
 
     @callback
     def _handle_state_change(self, event: Event) -> None:
@@ -486,6 +548,7 @@ class EnergyLedgerCoordinator:
         if not stored:
             return
         self._last_raw_energy = dict(stored.get("last_raw_energy", {}))
+        self._cycle_marks = dict(stored.get("cycle_marks", {}))
         for node_id, node_data in stored.get("nodes", {}).items():
             cost = _load_accumulators(node_data.get("cost", {}), now)
             # "energy" no existía en versiones previas del storage: los períodos que falten
@@ -519,6 +582,7 @@ class EnergyLedgerCoordinator:
                 for node_id, node in self.nodes.items()
             },
             "last_raw_energy": self._last_raw_energy,
+            "cycle_marks": self._cycle_marks,
         }
 
     def diagnostics_snapshot(self) -> dict[str, Any]:
@@ -540,4 +604,5 @@ class EnergyLedgerCoordinator:
             },
             "last_cost_method": dict(self._last_cost_method),
             "savings_gap_since": self._savings_gap_since.isoformat() if self._savings_gap_since else None,
+            "cycle_marks": dict(self._cycle_marks),
         }

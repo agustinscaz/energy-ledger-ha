@@ -53,6 +53,12 @@ PERIOD_MONTH = "month"
 PERIOD_YEAR = "year"
 PERIODS = (PERIOD_DAY, PERIOD_WEEK, PERIOD_MONTH, PERIOD_YEAR)
 
+# Pseudo-período interno que nunca cierra (ver _period_start): un acumulado corriendo desde
+# siempre, nunca expuesto como sensor propio (no está en PERIODS). Sirve de base estable para
+# calcular el delta de un ciclo (start_cycle/end_cycle, issue #13) sin verse afectado por un
+# corte de calendario de día/semana/mes/año a mitad del ciclo.
+PERIOD_LIFETIME = "lifetime"
+
 # "ano" sin tilde a propósito: un entity_id de HA no admite "ñ" en su slug.
 PERIOD_SUFFIX = {
     PERIOD_DAY: "hoy",
@@ -81,3 +87,8 @@ ENERGY_METHOD_INTEGRATED = "potencia_integrada"
 ATTR_COST_METHOD = "metodo_coste"
 COST_METHOD_SHARED = "repartido"
 COST_METHOD_UNSHARED = "binario_sin_repartir"
+
+# Servicios start_cycle/end_cycle (ver issue #13): coste/energía de un ciclo de electrodoméstico
+# (o de toda la casa) sin necesitar un input_number externo que reste manualmente.
+SERVICE_START_CYCLE = "start_cycle"
+SERVICE_END_CYCLE = "end_cycle"

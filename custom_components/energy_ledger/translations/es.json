@@ -79,6 +79,16 @@
       }
     }
   },
+  "services": {
+    "start_cycle": {
+      "name": "Empezar ciclo",
+      "description": "Guarda una marca de inicio para calcular el coste/energía de un ciclo (ej. un lavado) al llamar a end_cycle después."
+    },
+    "end_cycle": {
+      "name": "Terminar ciclo",
+      "description": "Calcula el coste/energía desde el último start_cycle de este dispositivo y devuelve el resultado."
+    }
+  },
   "entity": {
     "sensor": {
       "cost_day": { "name": "Coste hoy" },

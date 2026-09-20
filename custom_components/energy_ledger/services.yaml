@@ -1,0 +1,9 @@
+start_cycle:
+  target:
+    device:
+      integration: energy_ledger
+
+end_cycle:
+  target:
+    device:
+      integration: energy_ledger

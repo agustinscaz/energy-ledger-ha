@@ -763,3 +763,148 @@ async def test_async_unload_flushes_pending_save_immediately(hass):
     await coordinator.async_unload()
 
     coordinator._store.async_save.assert_awaited_once_with(coordinator._to_storage_dict())
+
+
+# --- start_cycle / end_cycle (issue #13) --------------------------------------------------------
+
+
+async def test_end_cycle_computes_delta_since_start_cycle(hass):
+    entry = _make_entry(hass, positive_is_export=True, circuits={"Lavavajillas": "sensor.lavavajillas_power"})
+    circuit_id = next(iter(entry.subentries))
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(GRID, "-2000", {"unit_of_measurement": "W"})  # importando 2kW
+    hass.states.async_set("sensor.lavavajillas_power", "2000", {"unit_of_measurement": "W"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)  # fija tarifas, elapsed=0
+
+    coordinator.start_cycle(circuit_id, now)
+    coordinator._recompute(now + timedelta(hours=1))  # 2kW * 1h a 0.20€/kWh = 0.40€, 2kWh
+
+    result = coordinator.end_cycle(circuit_id, now + timedelta(hours=1))
+
+    assert result["cost"] == pytest.approx(0.40)
+    assert result["energy_kwh"] == pytest.approx(2.0)
+    assert result["compensation"] is None  # circuito: nunca compensa
+    assert result["savings"] is None  # circuito: no tiene ahorro propio
+    assert result["duration_seconds"] == 3600
+    assert result["cost_method"] == COST_METHOD_UNSHARED  # sin home_load_power_entity
+    assert result["energy_method"] == ENERGY_METHOD_INTEGRATED
+
+
+async def test_end_cycle_without_start_cycle_raises(hass):
+    entry = _make_entry(hass, circuits={"Termo": "sensor.termo_power"})
+    circuit_id = next(iter(entry.subentries))
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+
+    with pytest.raises(LookupError):
+        coordinator.end_cycle(circuit_id, now)
+
+
+async def test_start_cycle_called_twice_resets_mark_without_error(hass):
+    entry = _make_entry(hass, circuits={"Termo": "sensor.termo_power"})
+    circuit_id = next(iter(entry.subentries))
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})
+    hass.states.async_set("sensor.termo_power", "1000", {"unit_of_measurement": "W"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)
+
+    coordinator.start_cycle(circuit_id, now)
+    coordinator._recompute(now + timedelta(minutes=30))
+    coordinator.start_cycle(circuit_id, now + timedelta(minutes=30))  # pisa la marca sin romper nada
+    coordinator._recompute(now + timedelta(hours=1))
+
+    result = coordinator.end_cycle(circuit_id, now + timedelta(hours=1))
+    assert result["duration_seconds"] == 1800  # solo los últimos 30 minutos, no la hora entera
+
+
+async def test_cycle_lifetime_accumulator_not_affected_by_calendar_close(hass):
+    """El ciclo puede cruzar medianoche (ej. un lavado nocturno) — el acumulado lifetime, a
+    diferencia de los de día/semana/mes/año, nunca cierra, así que el delta sigue siendo exacto."""
+    entry = _make_entry(hass, circuits={"Termo": "sensor.termo_power"})
+    circuit_id = next(iter(entry.subentries))
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})
+    hass.states.async_set("sensor.termo_power", "1000", {"unit_of_measurement": "W"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 23, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)
+
+    coordinator.start_cycle(circuit_id, now)
+    coordinator._recompute(now + timedelta(minutes=30))  # mismo día: cost_day.value = 0.5h*0.20 = 0.10
+    later = now + timedelta(hours=2)  # cruza medianoche
+    coordinator._recompute(later)
+
+    # El "day" sí cerró: lo que llevaba acumulado antes del cruce (0.10) queda en last_closed_value,
+    # el día nuevo arranca en 0 y solo lleva la porción posterior al cruce...
+    assert coordinator.nodes[circuit_id].cost["day"].last_closed_value == pytest.approx(0.10)
+    # ...pero el ciclo, basado en lifetime, no se ve afectado por ese corte: ve el total completo.
+    result = coordinator.end_cycle(circuit_id, later)
+    assert result["cost"] == pytest.approx(0.20 * 2)  # 1kW * 2h * 0.20€/kWh
+
+
+async def test_cycle_mark_survives_restart(hass):
+    entry = _make_entry(hass, circuits={"Termo": "sensor.termo_power"})
+    circuit_id = next(iter(entry.subentries))
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})
+    hass.states.async_set("sensor.termo_power", "1000", {"unit_of_measurement": "W"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)
+    coordinator.start_cycle(circuit_id, now)
+    await coordinator._async_save()
+
+    restarted = EnergyLedgerCoordinator(hass, entry)
+    later = now + timedelta(hours=1)
+    await restarted._async_load(later)
+    restarted._ensure_nodes(later)
+    restarted._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    restarted._last_update = later
+    restarted._recompute(later)  # fija tarifas, elapsed=0 (igual que async_setup real)
+    restarted._recompute(later + timedelta(hours=1))
+
+    result = restarted.end_cycle(circuit_id, later + timedelta(hours=1))
+    assert result["cost"] == pytest.approx(0.20)  # 1kW * 1h * 0.20€/kWh, la marca sobrevivió
+
+
+async def test_home_cycle_includes_compensation_and_savings(hass):
+    entry = _make_entry(hass, positive_is_export=True, sell_price=True, home_load=True)
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(SELL, "0.05", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(LOAD, "3000", {"unit_of_measurement": "W"})
+    hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)
+
+    coordinator.start_cycle(NODE_HOME, now)
+    coordinator._recompute(now + timedelta(hours=1))
+
+    result = coordinator.end_cycle(NODE_HOME, now + timedelta(hours=1))
+    assert result["compensation"] == pytest.approx(0.0)  # importando, no exportando
+    assert result["savings"] == pytest.approx(0.20 * 2.0)  # autoconsumo = 3-1 = 2kW

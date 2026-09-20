@@ -79,6 +79,16 @@
       }
     }
   },
+  "services": {
+    "start_cycle": {
+      "name": "Start cycle",
+      "description": "Saves a start mark to compute the cost/energy of a cycle (e.g. a wash) when end_cycle is called afterwards."
+    },
+    "end_cycle": {
+      "name": "End cycle",
+      "description": "Computes cost/energy since this device's last start_cycle and returns the result."
+    }
+  },
   "entity": {
     "sensor": {
       "cost_day": { "name": "Cost today" },

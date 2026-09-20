@@ -6,10 +6,20 @@ from __future__ import annotations
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.typing import ConfigType
 
 from .coordinator import EnergyLedgerCoordinator
+from .services import async_setup_services
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Nivel de dominio, no por config entry: los servicios start_cycle/end_cycle (#13) no son
+    propios de UNA instalación — target: device resuelve a la instalación que corresponda según
+    el dispositivo elegido (ver services.py), así que se registran una sola vez acá."""
+    async_setup_services(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
