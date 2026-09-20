@@ -1,0 +1,5 @@
+# Dependencias para ejecutar los tests, que usan objetos reales de Home Assistant
+# (config_flow.py, coordinator.py, sensor.py, __init__.py) vía pytest-homeassistant-custom-component.
+pytest-homeassistant-custom-component
+pytest-asyncio
+pytest-cov

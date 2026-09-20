@@ -1,0 +1,62 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Energy Ledger",
+        "description": "Energy Ledger reads your own power and price entities to keep a running cost, compensation and net balance — it doesn't scrape anything external or control your inverter/battery.",
+        "data": {
+          "grid_power_entity": "Net grid power sensor (W)",
+          "positive_is_export": "Positive = exporting (negative = importing)",
+          "buy_price_entity": "Buy price sensor (currency/kWh)",
+          "sell_price_entity": "Surplus sell price sensor (currency/kWh, optional)"
+        },
+        "data_description": {
+          "grid_power_entity": "E.g. sensor.goodwe_meter_active_power_total. Positive/negative according to the toggle below.",
+          "positive_is_export": "Turn this off if your sensor uses the opposite convention (positive = importing).",
+          "buy_price_entity": "The real-time price you pay for every kWh imported from the grid.",
+          "sell_price_entity": "Leave empty if you aren't compensated for surplus: compensation and balance won't be tracked."
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+    }
+  },
+  "config_subentries": {
+    "circuit": {
+      "entry_type": "Circuit",
+      "initiate_flow": {
+        "user": "Add circuit"
+      },
+      "step": {
+        "user": {
+          "title": "Add circuit",
+          "description": "An extra circuit you want to track besides the house total, e.g. a water heater or a washing machine.",
+          "data": {
+            "name": "Name",
+            "power_entity": "Power sensor (W)"
+          }
+        }
+      },
+      "error": {
+        "name_required": "Name cannot be empty."
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "cost_day": { "name": "Cost today" },
+      "cost_week": { "name": "Cost this week" },
+      "cost_month": { "name": "Cost this month" },
+      "cost_year": { "name": "Cost this year" },
+      "compensation_day": { "name": "Compensation today" },
+      "compensation_week": { "name": "Compensation this week" },
+      "compensation_month": { "name": "Compensation this month" },
+      "compensation_year": { "name": "Compensation this year" },
+      "balance_day": { "name": "Net balance today" },
+      "balance_week": { "name": "Net balance this week" },
+      "balance_month": { "name": "Net balance this month" },
+      "balance_year": { "name": "Net balance this year" }
+    }
+  }
+}

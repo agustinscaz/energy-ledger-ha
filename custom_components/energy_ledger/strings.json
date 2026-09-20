@@ -1,0 +1,62 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configurar Energy Ledger",
+        "description": "Energy Ledger lee tus propias entidades de potencia y precio para llevar la cuenta de coste, compensación y balance neto — no scrapea nada externo ni controla tu inversor/batería.",
+        "data": {
+          "grid_power_entity": "Sensor de potencia neta de red (W)",
+          "positive_is_export": "Positivo = exportando (negativo = importando)",
+          "buy_price_entity": "Sensor de precio de compra (€/kWh)",
+          "sell_price_entity": "Sensor de precio de venta de excedentes (€/kWh, opcional)"
+        },
+        "data_description": {
+          "grid_power_entity": "Ej. sensor.goodwe_meter_active_power_total. Positivo/negativo según lo que marques abajo.",
+          "positive_is_export": "Desmarcá esto si tu sensor usa la convención contraria (positivo = importando).",
+          "buy_price_entity": "El precio en tiempo real que pagás por cada kWh importado de la red.",
+          "sell_price_entity": "Dejalo vacío si no te compensan los excedentes: no se trackeará compensación ni balance."
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+    }
+  },
+  "config_subentries": {
+    "circuit": {
+      "entry_type": "Circuito",
+      "initiate_flow": {
+        "user": "Añadir circuito"
+      },
+      "step": {
+        "user": {
+          "title": "Añadir circuito",
+          "description": "Un circuito extra que querés trackear además del total de la casa, ej. un termo o una lavadora.",
+          "data": {
+            "name": "Nombre",
+            "power_entity": "Sensor de potencia (W)"
+          }
+        }
+      },
+      "error": {
+        "name_required": "El nombre no puede estar vacío."
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "cost_day": { "name": "Coste hoy" },
+      "cost_week": { "name": "Coste esta semana" },
+      "cost_month": { "name": "Coste este mes" },
+      "cost_year": { "name": "Coste este año" },
+      "compensation_day": { "name": "Compensación hoy" },
+      "compensation_week": { "name": "Compensación esta semana" },
+      "compensation_month": { "name": "Compensación este mes" },
+      "compensation_year": { "name": "Compensación este año" },
+      "balance_day": { "name": "Balance neto hoy" },
+      "balance_week": { "name": "Balance neto esta semana" },
+      "balance_month": { "name": "Balance neto este mes" },
+      "balance_year": { "name": "Balance neto este año" }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "domain": "energy_ledger",
+  "name": "Energy Ledger",
+  "codeowners": ["@agustinscaz"],
+  "config_flow": true,
+  "documentation": "https://github.com/agustinscaz/energy-ledger-ha",
+  "integration_type": "hub",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/agustinscaz/energy-ledger-ha/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
