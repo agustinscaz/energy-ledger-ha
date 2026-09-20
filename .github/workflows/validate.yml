@@ -24,6 +24,9 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
+          # "brands" solo hace falta para entrar al store por defecto de HACS (requiere assets en
+          # home-assistant/brands) — no aplica mientras esto se instale como "custom repository".
+          ignore: brands
 
   tests:
     name: Tests (pytest)
