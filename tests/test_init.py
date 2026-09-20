@@ -51,26 +51,27 @@ async def test_setup_creates_expected_sensors_and_unloads_cleanly(hass):
     ent_reg = er.async_get(hass)
     circuit_id = next(iter(entry.subentries))
 
-    # Casa: coste + compensación + balance, 4 períodos cada uno.
-    for kind in ("cost", "compensation", "balance"):
+    # Casa: coste + energía + compensación + balance, 4 períodos cada uno.
+    for kind in ("cost", "energy", "compensation", "balance"):
         for period in ("day", "week", "month", "year"):
             unique_id = f"{entry.entry_id}_home_{kind}_{period}"
             entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, unique_id)
             assert entity_id is not None, f"falta {unique_id}"
             assert hass.states.get(entity_id) is not None
 
-    # Circuito: solo coste, 4 períodos.
-    for period in ("day", "week", "month", "year"):
-        unique_id = f"{entry.entry_id}_{circuit_id}_cost_{period}"
-        entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, unique_id)
-        assert entity_id is not None, f"falta {unique_id}"
+    # Circuito: coste + energía, 4 períodos cada uno.
+    for kind in ("cost", "energy"):
+        for period in ("day", "week", "month", "year"):
+            unique_id = f"{entry.entry_id}_{circuit_id}_{kind}_{period}"
+            entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, unique_id)
+            assert entity_id is not None, f"falta {unique_id}"
 
     # Sin compensación no debería existir un balance/compensación para el circuito.
     assert ent_reg.async_get_entity_id("sensor", DOMAIN, f"{entry.entry_id}_{circuit_id}_compensation_day") is None
     assert ent_reg.async_get_entity_id("sensor", DOMAIN, f"{entry.entry_id}_{circuit_id}_balance_day") is None
 
     all_entities = er.async_entries_for_config_entry(ent_reg, entry.entry_id)
-    assert len(all_entities) == 12 + 4
+    assert len(all_entities) == 16 + 8  # casa: 4 kinds * 4 periodos; circuito: 2 kinds * 4 periodos
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
@@ -96,4 +97,4 @@ async def test_setup_without_sell_price_skips_compensation_and_balance(hass):
 
     ent_reg = er.async_get(hass)
     all_entities = er.async_entries_for_config_entry(ent_reg, entry.entry_id)
-    assert len(all_entities) == 4  # solo coste, sin sell_price_entity
+    assert len(all_entities) == 8  # coste + energía, sin sell_price_entity

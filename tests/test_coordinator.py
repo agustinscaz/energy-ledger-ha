@@ -69,7 +69,7 @@ async def test_cost_zero_while_exporting_or_zero_default_convention(hass):
     coordinator = EnergyLedgerCoordinator(hass, entry)
     now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
     coordinator._ensure_nodes(now)
-    coordinator._last_rates = {NODE_HOME: (0.0, 0.0)}
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0)}
     coordinator._recompute(now)
 
     assert coordinator._last_rates[NODE_HOME][0] == 0.0
@@ -87,10 +87,10 @@ async def test_cost_real_price_while_importing_default_convention(hass):
     coordinator = EnergyLedgerCoordinator(hass, entry)
     now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
     coordinator._ensure_nodes(now)
-    coordinator._last_rates = {NODE_HOME: (0.0, 0.0)}
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0)}
     coordinator._recompute(now)
 
-    cost_rate, _ = coordinator._last_rates[NODE_HOME]
+    cost_rate, _, _ = coordinator._last_rates[NODE_HOME]
     assert cost_rate == pytest.approx(0.20 * 1.5)
 
 
@@ -102,16 +102,16 @@ async def test_cost_rule_with_inverted_convention(hass):
     coordinator = EnergyLedgerCoordinator(hass, entry)
     now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
     coordinator._ensure_nodes(now)
-    coordinator._last_rates = {NODE_HOME: (0.0, 0.0)}
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0)}
 
     hass.states.async_set(GRID, "1500", {"unit_of_measurement": "W"})  # positivo = importando
     coordinator._recompute(now)
-    cost_rate, _ = coordinator._last_rates[NODE_HOME]
+    cost_rate, _, _ = coordinator._last_rates[NODE_HOME]
     assert cost_rate == pytest.approx(0.20 * 1.5)
 
     hass.states.async_set(GRID, "-500", {"unit_of_measurement": "W"})  # negativo = exportando
     coordinator._recompute(now)
-    cost_rate, _ = coordinator._last_rates[NODE_HOME]
+    cost_rate, _, _ = coordinator._last_rates[NODE_HOME]
     assert cost_rate == 0.0
 
 
@@ -125,16 +125,16 @@ async def test_circuit_uses_same_effective_price_as_house(hass):
     now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
     coordinator._ensure_nodes(now)
     circuit_id = next(iter(entry.subentries))
-    coordinator._last_rates = {NODE_HOME: (0.0, 0.0), circuit_id: (0.0, 0.0)}
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
 
     hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})  # casa importando
     coordinator._recompute(now)
-    circuit_rate, _ = coordinator._last_rates[circuit_id]
+    circuit_rate, _, _ = coordinator._last_rates[circuit_id]
     assert circuit_rate == pytest.approx(0.10 * 2.0)
 
     hass.states.async_set(GRID, "1000", {"unit_of_measurement": "W"})  # casa exportando
     coordinator._recompute(now)
-    circuit_rate, _ = coordinator._last_rates[circuit_id]
+    circuit_rate, _, _ = coordinator._last_rates[circuit_id]
     assert circuit_rate == 0.0
 
 
@@ -207,7 +207,7 @@ async def test_persistence_survives_restart(hass):
     coordinator = EnergyLedgerCoordinator(hass, entry)
     coordinator._ensure_nodes(now)
     coordinator._last_update = now
-    coordinator._last_rates = {NODE_HOME: (0.0, 0.0)}
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0)}
     coordinator._recompute(now)  # fija la tarifa (elapsed=0, no acumula nada todavía)
 
     coordinator._recompute(now + timedelta(minutes=30))  # acumula 0.5h * 0.15€/h
@@ -217,7 +217,7 @@ async def test_persistence_survives_restart(hass):
 
     # "Reinicio de HA": un coordinator nuevo que carga del mismo Store en disco.
     restarted = EnergyLedgerCoordinator(hass, entry)
-    await restarted._async_load()
+    await restarted._async_load(now + timedelta(minutes=30))
 
     assert restarted.nodes[NODE_HOME].cost["day"].value == pytest.approx(0.075)
     assert restarted.nodes[NODE_HOME].cost["week"].value == pytest.approx(0.075)
@@ -237,7 +237,7 @@ async def test_balance_is_compensation_minus_cost(hass):
     coordinator = EnergyLedgerCoordinator(hass, entry)
     coordinator._ensure_nodes(now)
     coordinator._last_update = now
-    coordinator._last_rates = {NODE_HOME: (0.0, 0.0)}
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0)}
 
     hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})  # importando 1kW
     coordinator._recompute(now)  # fija cost_rate=0.20€/h, comp_rate=0
