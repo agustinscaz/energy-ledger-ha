@@ -9,14 +9,16 @@
           "positive_is_export": "Positive = exporting (negative = importing)",
           "buy_price_entity": "Buy price sensor (currency/kWh)",
           "sell_price_entity": "Surplus sell price sensor (currency/kWh, optional)",
-          "home_load_power_entity": "Total home load power sensor (W, optional)"
+          "home_load_power_entity": "Total home load power sensor (W, optional)",
+          "grid_import_energy_entity": "Real import energy meter sensor (kWh, optional)"
         },
         "data_description": {
           "grid_power_entity": "E.g. sensor.goodwe_meter_active_power_total. Positive/negative according to the toggle below.",
           "positive_is_export": "Turn this off if your sensor uses the opposite convention (positive = importing).",
           "buy_price_entity": "The real-time price you pay for every kWh imported from the grid.",
           "sell_price_entity": "Leave empty if you aren't compensated for surplus: compensation and balance won't be tracked.",
-          "home_load_power_entity": "Needed for the self-consumption savings sensor. Leave empty to skip it."
+          "home_load_power_entity": "Needed for the self-consumption savings sensor. Leave empty to skip it.",
+          "grid_import_energy_entity": "If you have a real meter (e.g. from your own inverter), the home's kWh comes from it instead of being rebuilt from power — more accurate. Leave empty to keep using integrated power."
         }
       }
     },
@@ -36,7 +38,8 @@
           "description": "An extra circuit you want to track besides the house total, e.g. a water heater or a washing machine.",
           "data": {
             "name": "Name",
-            "power_entity": "Power sensor (W)"
+            "power_entity": "Power sensor (W)",
+            "energy_entity": "Real energy meter sensor (kWh, optional)"
           }
         }
       },

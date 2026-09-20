@@ -13,6 +13,12 @@ CONF_SELL_PRICE_ENTITY = "sell_price_entity"
 # puede derivar autoconsumo (autoconsumo_kw = load_kw - import_kw), así que el sensor de ahorro
 # (ver issue #6) solo se crea si está configurado.
 CONF_HOME_LOAD_POWER_ENTITY = "home_load_power_entity"
+# Opcionales, ver issue #7: contador real de energía (kWh, típicamente state_class
+# total_increasing) para reemplazar la reconstrucción por potencia integrada, que arrastra un
+# pequeño error de discretización (Riemann por la izquierda). CONF_CIRCUIT_ENERGY_ENTITY es un
+# campo del subentry "circuit"; CONF_GRID_IMPORT_ENERGY_ENTITY es del nodo casa/red.
+CONF_CIRCUIT_ENERGY_ENTITY = "energy_entity"
+CONF_GRID_IMPORT_ENERGY_ENTITY = "grid_import_energy_entity"
 
 # Claves de subentry.data (subentries de tipo "circuit", repetibles, uno por electrodoméstico).
 CONF_CIRCUIT_NAME = "name"
@@ -57,3 +63,8 @@ ATTR_PERIOD_START = "fecha_inicio_periodo"
 # la misma lectura) cuando grid_power_entity o buy_price_entity están unavailable/unknown: desde
 # cuándo está el dato "congelado" en la última tarifa válida. None cuando no hay hueco en curso.
 ATTR_DATA_GAP_SINCE = "datos_incompletos_desde"
+
+# Solo en LedgerEnergySensor (ver issue #7): de qué fuente sale el kWh del período.
+ATTR_ENERGY_METHOD = "metodo"
+ENERGY_METHOD_METER = "contador_real"
+ENERGY_METHOD_INTEGRATED = "potencia_integrada"

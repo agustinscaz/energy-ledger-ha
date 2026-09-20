@@ -18,8 +18,10 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_BUY_PRICE_ENTITY,
+    CONF_CIRCUIT_ENERGY_ENTITY,
     CONF_CIRCUIT_NAME,
     CONF_CIRCUIT_POWER_ENTITY,
+    CONF_GRID_IMPORT_ENERGY_ENTITY,
     CONF_GRID_POWER_ENTITY,
     CONF_HOME_LOAD_POWER_ENTITY,
     CONF_POSITIVE_IS_EXPORT,
@@ -38,6 +40,7 @@ STEP_USER_SCHEMA = vol.Schema(
         vol.Required(CONF_BUY_PRICE_ENTITY): _SENSOR_SELECTOR,
         vol.Optional(CONF_SELL_PRICE_ENTITY): _SENSOR_SELECTOR,
         vol.Optional(CONF_HOME_LOAD_POWER_ENTITY): _SENSOR_SELECTOR,
+        vol.Optional(CONF_GRID_IMPORT_ENERGY_ENTITY): _SENSOR_SELECTOR,
     }
 )
 
@@ -59,6 +62,8 @@ class EnergyLedgerConfigFlow(ConfigFlow, domain=DOMAIN):
                 data.pop(CONF_SELL_PRICE_ENTITY, None)
             if not data.get(CONF_HOME_LOAD_POWER_ENTITY):
                 data.pop(CONF_HOME_LOAD_POWER_ENTITY, None)
+            if not data.get(CONF_GRID_IMPORT_ENERGY_ENTITY):
+                data.pop(CONF_GRID_IMPORT_ENERGY_ENTITY, None)
 
             return self.async_create_entry(title="Energy Ledger", data=data)
 
@@ -74,6 +79,7 @@ STEP_CIRCUIT_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_CIRCUIT_NAME): str,
         vol.Required(CONF_CIRCUIT_POWER_ENTITY): _SENSOR_SELECTOR,
+        vol.Optional(CONF_CIRCUIT_ENERGY_ENTITY): _SENSOR_SELECTOR,
     }
 )
 
@@ -89,9 +95,9 @@ class CircuitSubentryFlowHandler(ConfigSubentryFlow):
             if not name:
                 errors["base"] = "name_required"
             else:
-                return self.async_create_entry(
-                    title=name,
-                    data={CONF_CIRCUIT_NAME: name, CONF_CIRCUIT_POWER_ENTITY: user_input[CONF_CIRCUIT_POWER_ENTITY]},
-                )
+                data = {CONF_CIRCUIT_NAME: name, CONF_CIRCUIT_POWER_ENTITY: user_input[CONF_CIRCUIT_POWER_ENTITY]}
+                if user_input.get(CONF_CIRCUIT_ENERGY_ENTITY):
+                    data[CONF_CIRCUIT_ENERGY_ENTITY] = user_input[CONF_CIRCUIT_ENERGY_ENTITY]
+                return self.async_create_entry(title=name, data=data)
 
         return self.async_show_form(step_id="user", data_schema=STEP_CIRCUIT_SCHEMA, errors=errors)

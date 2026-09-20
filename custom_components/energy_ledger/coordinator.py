@@ -28,13 +28,17 @@ from homeassistant.util import dt as dt_util
 from .const import (
     BACKGROUND_UPDATE_INTERVAL_SECONDS,
     CONF_BUY_PRICE_ENTITY,
+    CONF_CIRCUIT_ENERGY_ENTITY,
     CONF_CIRCUIT_POWER_ENTITY,
+    CONF_GRID_IMPORT_ENERGY_ENTITY,
     CONF_GRID_POWER_ENTITY,
     CONF_HOME_LOAD_POWER_ENTITY,
     CONF_POSITIVE_IS_EXPORT,
     CONF_SELL_PRICE_ENTITY,
     DEFAULT_POSITIVE_IS_EXPORT,
     DOMAIN,
+    ENERGY_METHOD_INTEGRATED,
+    ENERGY_METHOD_METER,
     NODE_HOME,
     PERIODS,
     STORAGE_KEY_PREFIX,
@@ -104,8 +108,10 @@ def _load_accumulators(data: dict[str, Any], now: datetime) -> dict[str, PeriodA
     return loaded
 
 
-def _advance_accumulators(accumulators: dict[str, PeriodAccumulator], now: datetime, elapsed_h: float, rate: float) -> None:
-    """Cierra los períodos cuyo límite de calendario se cruzó y suma la contribución nueva.
+def _advance_accumulators(accumulators: dict[str, PeriodAccumulator], now: datetime, amount: float) -> None:
+    """Cierra los períodos cuyo límite de calendario se cruzó y suma `amount` (ya calculado por
+    el caller: elapsed_h * rate para las fuentes basadas en potencia integrada, o el delta de un
+    contador real de energía — ver issue #7).
 
     El cierre de calendario SIEMPRE va antes de sumar: si se cruzó un límite, el acumulado viejo
     se guarda en `last_closed_value` y el nuevo arranca en 0 — no se reparte la contribución entre
@@ -120,8 +126,8 @@ def _advance_accumulators(accumulators: dict[str, PeriodAccumulator], now: datet
             acc.last_closed_value = acc.value
             acc.value = 0.0
             acc.period_start = correct_start
-        if elapsed_h > 0 and rate:
-            acc.value += elapsed_h * rate
+        if amount:
+            acc.value += amount
 
 
 @dataclass
@@ -156,6 +162,14 @@ class EnergyLedgerCoordinator:
         # Tarifa de ahorro (€/h) vigente para la casa. Separada de _last_rates (que es por nodo y
         # todo nodo la tiene) porque el ahorro es un concepto exclusivo de la casa y opcional.
         self._last_savings_rate: float = 0.0
+        # node_id -> última lectura cruda (kWh) de su contador real de energía, si tiene uno
+        # configurado (ver issue #7). Persistido en Store — perder esto en un reinicio haría que
+        # la primera lectura post-reinicio se tratara como "primera vez" y se pierda un delta real.
+        self._last_raw_energy: dict[str, float | None] = {}
+        # node_id -> desde cuándo su energy_entity/grid_import_energy_entity está
+        # unavailable/unknown. No persistido (mismo criterio que _data_gap_since: se
+        # redetecta fresco en cada arranque).
+        self._energy_gap_since: dict[str, datetime | None] = {}
         self._listeners: list[Callable[[], None]] = []
         self._unsub_state: Callable[[], None] | None = None
         self._unsub_interval: Callable[[], None] | None = None
@@ -172,6 +186,22 @@ class EnergyLedgerCoordinator:
     def data_gap_since(self) -> datetime | None:
         return self._data_gap_since
 
+    def _energy_entity_for(self, node_id: str) -> str | None:
+        """entity_id del contador real de energía de este nodo, si tiene uno configurado —
+        grid_import_energy_entity para la casa, energy_entity del subentry para un circuito."""
+        if node_id == NODE_HOME:
+            return self.entry.data.get(CONF_GRID_IMPORT_ENERGY_ENTITY)
+        sub = self.entry.subentries.get(node_id)
+        if sub is not None and sub.subentry_type == SUBENTRY_TYPE_CIRCUIT:
+            return sub.data.get(CONF_CIRCUIT_ENERGY_ENTITY)
+        return None
+
+    def energy_method(self, node_id: str) -> str:
+        return ENERGY_METHOD_METER if self._energy_entity_for(node_id) else ENERGY_METHOD_INTEGRATED
+
+    def energy_gap_since(self, node_id: str) -> datetime | None:
+        return self._energy_gap_since.get(node_id)
+
     def _circuit_subentry_ids(self) -> list[str]:
         return [sub_id for sub_id, sub in self.entry.subentries.items() if sub.subentry_type == SUBENTRY_TYPE_CIRCUIT]
 
@@ -183,9 +213,15 @@ class EnergyLedgerCoordinator:
         home_load_power_entity = self.entry.data.get(CONF_HOME_LOAD_POWER_ENTITY)
         if home_load_power_entity:
             ids.append(home_load_power_entity)
+        grid_import_energy_entity = self.entry.data.get(CONF_GRID_IMPORT_ENERGY_ENTITY)
+        if grid_import_energy_entity:
+            ids.append(grid_import_energy_entity)
         for sub in self.entry.subentries.values():
             if sub.subentry_type == SUBENTRY_TYPE_CIRCUIT:
                 ids.append(sub.data[CONF_CIRCUIT_POWER_ENTITY])
+                circuit_energy_entity = sub.data.get(CONF_CIRCUIT_ENERGY_ENTITY)
+                if circuit_energy_entity:
+                    ids.append(circuit_energy_entity)
         return ids
 
     async def async_setup(self) -> None:
@@ -245,6 +281,8 @@ class EnergyLedgerCoordinator:
             if node_id not in wanted:
                 del self.nodes[node_id]
                 self._last_rates.pop(node_id, None)
+                self._last_raw_energy.pop(node_id, None)
+                self._energy_gap_since.pop(node_id, None)
 
     @callback
     def _handle_state_change(self, event: Event) -> None:
@@ -266,15 +304,51 @@ class EnergyLedgerCoordinator:
 
         for node_id, node in self.nodes.items():
             cost_rate, compensation_rate, energy_rate = self._last_rates.get(node_id, (0.0, 0.0, 0.0))
-            _advance_accumulators(node.cost, now, elapsed_h, cost_rate)
+            _advance_accumulators(node.cost, now, elapsed_h * cost_rate)
             if node.compensation is not None:
-                _advance_accumulators(node.compensation, now, elapsed_h, compensation_rate)
-            _advance_accumulators(node.energy, now, elapsed_h, energy_rate)
+                _advance_accumulators(node.compensation, now, elapsed_h * compensation_rate)
+            self._advance_node_energy(node_id, node, now, energy_rate, elapsed_h)
             if node.savings is not None:
-                _advance_accumulators(node.savings, now, elapsed_h, self._last_savings_rate)
+                _advance_accumulators(node.savings, now, elapsed_h * self._last_savings_rate)
 
         self._last_update = now
         self._recompute_rates(now)
+
+    def _advance_node_energy(
+        self, node_id: str, node: NodeAccumulators, now: datetime, energy_rate_kw: float, elapsed_h: float
+    ) -> None:
+        """kWh del nodo en el período: por defecto potencia integrada (energy_rate_kw * elapsed_h,
+        Riemann por la izquierda, ~3% de error frente a un contador real — ver issue #7). Si el
+        nodo tiene un contador real configurado (energy_entity del circuito, o
+        grid_import_energy_entity de la casa), se usa ESE en cambio: se lee el valor crudo y se
+        acumula el delta contra la última lectura, exacto sin reconstruir nada.
+
+        Si el contador real está unavailable/unknown, se congela (no se suma nada, no se pisa
+        last_raw_value) y se marca el hueco en self._energy_gap_since[node_id] — mismo criterio
+        de "cero honesto, no pisar con 0" que _recompute_rates para grid/buy_price (#2), pero acá
+        acotado a este nodo/entidad en particular, sin tocar el data_gap_since global."""
+        energy_entity = self._energy_entity_for(node_id)
+        if not energy_entity:
+            _advance_accumulators(node.energy, now, elapsed_h * energy_rate_kw)
+            return
+
+        raw = self._read_float(energy_entity)
+        if raw is None:
+            if self._energy_gap_since.get(node_id) is None:
+                self._energy_gap_since[node_id] = now
+            _advance_accumulators(node.energy, now, 0.0)  # el calendario cierra igual, sin sumar
+            return
+        self._energy_gap_since[node_id] = None
+
+        last_raw = self._last_raw_energy.get(node_id)
+        if last_raw is None:
+            delta_kwh = 0.0  # primera lectura: nada contra qué comparar todavía
+        elif raw >= last_raw:
+            delta_kwh = raw - last_raw
+        else:
+            delta_kwh = raw  # el contador se reinició: asume que arrancó de 0, no resta negativo
+        self._last_raw_energy[node_id] = raw
+        _advance_accumulators(node.energy, now, delta_kwh)
 
     def _recompute_rates(self, now: datetime) -> None:
         """Tarifa efectiva = precio de compra si la casa importa, 0 si no (autoconsumo/excedente).
@@ -346,6 +420,7 @@ class EnergyLedgerCoordinator:
         stored = await self._store.async_load()
         if not stored:
             return
+        self._last_raw_energy = dict(stored.get("last_raw_energy", {}))
         for node_id, node_data in stored.get("nodes", {}).items():
             cost = _load_accumulators(node_data.get("cost", {}), now)
             # "energy" no existía en versiones previas del storage: los períodos que falten
@@ -377,7 +452,8 @@ class EnergyLedgerCoordinator:
                     ),
                 }
                 for node_id, node in self.nodes.items()
-            }
+            },
+            "last_raw_energy": self._last_raw_energy,
         }
 
     def diagnostics_snapshot(self) -> dict[str, Any]:
@@ -393,4 +469,8 @@ class EnergyLedgerCoordinator:
             },
             "data_gap_since": self._data_gap_since.isoformat() if self._data_gap_since else None,
             "last_savings_rate": self._last_savings_rate,
+            "last_raw_energy": self._last_raw_energy,
+            "energy_gap_since": {
+                node_id: gap.isoformat() for node_id, gap in self._energy_gap_since.items() if gap is not None
+            },
         }

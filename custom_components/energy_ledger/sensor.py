@@ -14,11 +14,13 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import (
     ATTR_DATA_GAP_SINCE,
+    ATTR_ENERGY_METHOD,
     ATTR_LAST_CLOSED_PERIOD,
     ATTR_PERIOD_START,
     CONF_BUY_PRICE_ENTITY,
     CONF_CIRCUIT_NAME,
     DOMAIN,
+    ENERGY_METHOD_METER,
     NODE_HOME,
     PERIODS,
     SUBENTRY_TYPE_CIRCUIT,
@@ -155,6 +157,19 @@ class LedgerEnergySensor(_LedgerSensorBase):
     def _period_accumulator(self) -> PeriodAccumulator | None:
         node = self.coordinator.nodes.get(self._node_id)
         return node.energy.get(self._period) if node else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, float | str | None]:
+        attrs = dict(super().extra_state_attributes)
+        method = self.coordinator.energy_method(self._node_id)
+        attrs[ATTR_ENERGY_METHOD] = method
+        if method == ENERGY_METHOD_METER:
+            # Con contador real, el hueco relevante es el de ESA entidad (energy_entity /
+            # grid_import_energy_entity), no el data_gap_since global de grid/buy_price que
+            # heredó de la clase base — no tienen nada que ver entre sí en este modo.
+            gap = self.coordinator.energy_gap_since(self._node_id)
+            attrs[ATTR_DATA_GAP_SINCE] = gap.isoformat() if gap else None
+        return attrs
 
 
 class LedgerCompensationSensor(_LedgerSensorBase):

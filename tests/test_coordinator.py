@@ -10,13 +10,17 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.energy_ledger.const import (
     CONF_BUY_PRICE_ENTITY,
+    CONF_CIRCUIT_ENERGY_ENTITY,
     CONF_CIRCUIT_NAME,
     CONF_CIRCUIT_POWER_ENTITY,
+    CONF_GRID_IMPORT_ENERGY_ENTITY,
     CONF_GRID_POWER_ENTITY,
     CONF_HOME_LOAD_POWER_ENTITY,
     CONF_POSITIVE_IS_EXPORT,
     CONF_SELL_PRICE_ENTITY,
     DOMAIN,
+    ENERGY_METHOD_INTEGRATED,
+    ENERGY_METHOD_METER,
     NODE_HOME,
     SUBENTRY_TYPE_CIRCUIT,
 )
@@ -33,9 +37,13 @@ GRID = "sensor.grid_power"
 BUY = "sensor.buy_price"
 SELL = "sensor.sell_price"
 LOAD = "sensor.home_load"
+GRID_ENERGY = "sensor.grid_import_energy"
+CIRCUIT_ENERGY = "sensor.termo_energy"
 
 
-def _make_entry(hass, *, positive_is_export=True, sell_price=False, home_load=False, circuits=None):
+def _make_entry(
+    hass, *, positive_is_export=True, sell_price=False, home_load=False, grid_import_energy=False, circuits=None
+):
     data = {
         CONF_GRID_POWER_ENTITY: GRID,
         CONF_POSITIVE_IS_EXPORT: positive_is_export,
@@ -45,6 +53,8 @@ def _make_entry(hass, *, positive_is_export=True, sell_price=False, home_load=Fa
         data[CONF_SELL_PRICE_ENTITY] = SELL
     if home_load:
         data[CONF_HOME_LOAD_POWER_ENTITY] = LOAD
+    if grid_import_energy:
+        data[CONF_GRID_IMPORT_ENERGY_ENTITY] = GRID_ENERGY
 
     subentries_data = [
         {
@@ -165,7 +175,7 @@ def test_period_start_is_real_calendar_not_rolling():
 def test_boundary_closes_and_resets_regardless_of_crossing_time(period, before, after):
     accumulators = {period: PeriodAccumulator(period_start=_period_start(period, before), value=7.0)}
 
-    _advance_accumulators(accumulators, after, elapsed_h=0.1, rate=5.0)
+    _advance_accumulators(accumulators, after, amount=0.1 * 5.0)
 
     acc = accumulators[period]
     assert acc.last_closed_value == 7.0
@@ -179,7 +189,7 @@ def test_no_boundary_no_reset():
     accumulators["day"].value = 3.0
 
     later_same_day = datetime(2026, 3, 4, 11, 0, tzinfo=dt_util.UTC)
-    _advance_accumulators(accumulators, later_same_day, elapsed_h=1.0, rate=2.0)
+    _advance_accumulators(accumulators, later_same_day, amount=1.0 * 2.0)
 
     assert accumulators["day"].last_closed_value is None
     assert accumulators["day"].value == pytest.approx(5.0)  # 3.0 + 1h*2€/h
@@ -193,7 +203,7 @@ def test_restart_gap_resets_honestly_without_backfilling():
     accumulators = {"day": PeriodAccumulator(period_start=_period_start("day", before_shutdown), value=12.0)}
 
     after_long_downtime = datetime(2026, 3, 6, 9, 0, tzinfo=dt_util.UTC)  # dos días después
-    _advance_accumulators(accumulators, after_long_downtime, elapsed_h=0.0, rate=0.0)
+    _advance_accumulators(accumulators, after_long_downtime, amount=0.0)
 
     assert accumulators["day"].last_closed_value == 12.0
     assert accumulators["day"].value == 0.0
@@ -398,3 +408,190 @@ async def test_savings_freezes_when_load_entity_unavailable(hass):
     # No se pisa con 0: el hueco de home_load_power_entity no toca grid/buy, sigue sin gap global.
     assert coordinator.data_gap_since is None
     assert coordinator._last_savings_rate == pytest.approx(frozen_rate)
+
+
+# --- kWh exacto desde contador real (issue #7) ------------------------------------------------
+
+
+def _make_entry_with_circuit_meter(hass, *, circuit_energy_entity=CIRCUIT_ENERGY):
+    """Circuito con power_entity Y energy_entity — _make_entry no soporta el segundo, así que
+    arma el subentry a mano."""
+    data = {CONF_GRID_POWER_ENTITY: GRID, CONF_POSITIVE_IS_EXPORT: True, CONF_BUY_PRICE_ENTITY: BUY}
+    subentries_data = [
+        {
+            "data": {
+                CONF_CIRCUIT_NAME: "Termo",
+                CONF_CIRCUIT_POWER_ENTITY: "sensor.termo_power",
+                CONF_CIRCUIT_ENERGY_ENTITY: circuit_energy_entity,
+            },
+            "subentry_type": SUBENTRY_TYPE_CIRCUIT,
+            "title": "Termo",
+            "unique_id": None,
+        }
+    ]
+    entry = MockConfigEntry(domain=DOMAIN, data=data, subentries_data=subentries_data)
+    entry.add_to_hass(hass)
+    return entry
+
+
+async def test_energy_method_reports_integrated_by_default(hass):
+    entry = _make_entry(hass, circuits={"Termo": "sensor.termo_power"})
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    circuit_id = next(iter(entry.subentries))
+    assert coordinator.energy_method(NODE_HOME) == ENERGY_METHOD_INTEGRATED
+    assert coordinator.energy_method(circuit_id) == ENERGY_METHOD_INTEGRATED
+
+
+async def test_energy_method_reports_meter_when_energy_entity_configured(hass):
+    entry = _make_entry_with_circuit_meter(hass)
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    circuit_id = next(iter(entry.subentries))
+    assert coordinator.energy_method(circuit_id) == ENERGY_METHOD_METER
+    assert coordinator.energy_method(NODE_HOME) == ENERGY_METHOD_INTEGRATED  # sin grid_import_energy_entity
+
+
+async def test_circuit_energy_uses_real_meter_delta_not_integrated_power(hass):
+    """El caso concreto del issue: potencia integrada da ~3% de más que el contador real."""
+    entry = _make_entry_with_circuit_meter(hass)
+    circuit_id = next(iter(entry.subentries))
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set("sensor.termo_power", "2000", {"unit_of_measurement": "W"})
+    hass.states.async_set(CIRCUIT_ENERGY, "10.0", {"unit_of_measurement": "kWh"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)  # primera lectura: fija last_raw_energy=10.0, no suma nada
+    assert coordinator.nodes[circuit_id].energy["day"].value == pytest.approx(0.0)
+
+    hass.states.async_set(CIRCUIT_ENERGY, "10.84", {"unit_of_measurement": "kWh"})
+    coordinator._recompute(now + timedelta(hours=1))
+
+    # Delta real del contador (0.84), NO 2kW * 1h = 2.0 (lo que daría potencia integrada).
+    assert coordinator.nodes[circuit_id].energy["day"].value == pytest.approx(0.84)
+
+
+async def test_circuit_energy_meter_reset_assumes_restarted_from_zero(hass):
+    entry = _make_entry_with_circuit_meter(hass)
+    circuit_id = next(iter(entry.subentries))
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set("sensor.termo_power", "1000", {"unit_of_measurement": "W"})
+    hass.states.async_set(CIRCUIT_ENERGY, "50.0", {"unit_of_measurement": "kWh"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)  # last_raw_energy = 50.0
+
+    hass.states.async_set(CIRCUIT_ENERGY, "0.3", {"unit_of_measurement": "kWh"})  # el dispositivo se reinició
+    coordinator._recompute(now + timedelta(minutes=10))
+
+    # No resta (50.0 - 0.3 sería absurdo): asume que arrancó de 0 y suma el valor nuevo tal cual.
+    assert coordinator.nodes[circuit_id].energy["day"].value == pytest.approx(0.3)
+    assert coordinator._last_raw_energy[circuit_id] == pytest.approx(0.3)
+
+
+async def test_circuit_energy_freezes_and_marks_gap_when_meter_unavailable(hass):
+    entry = _make_entry_with_circuit_meter(hass)
+    circuit_id = next(iter(entry.subentries))
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set("sensor.termo_power", "1000", {"unit_of_measurement": "W"})
+    hass.states.async_set(CIRCUIT_ENERGY, "5.0", {"unit_of_measurement": "kWh"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)  # last_raw_energy = 5.0
+
+    hass.states.async_set(CIRCUIT_ENERGY, "unavailable")
+    later = now + timedelta(minutes=15)
+    coordinator._recompute(later)
+
+    assert coordinator.energy_gap_since(circuit_id) == later
+    assert coordinator._last_raw_energy[circuit_id] == pytest.approx(5.0)  # no se pierde
+    assert coordinator.nodes[circuit_id].energy["day"].value == pytest.approx(0.0)  # no se suma nada
+
+    hass.states.async_set(CIRCUIT_ENERGY, "5.5", {"unit_of_measurement": "kWh"})
+    coordinator._recompute(later + timedelta(minutes=5))
+
+    assert coordinator.energy_gap_since(circuit_id) is None
+    assert coordinator.nodes[circuit_id].energy["day"].value == pytest.approx(0.5)  # 5.5 - 5.0
+
+
+async def test_circuit_energy_meter_respects_calendar_close(hass):
+    """Corte de calendario combinado con contador real: cierra en la medianoche igual que con
+    potencia integrada, sin repartir el delta entre el día viejo y el nuevo."""
+    entry = _make_entry_with_circuit_meter(hass)
+    circuit_id = next(iter(entry.subentries))
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set("sensor.termo_power", "1000", {"unit_of_measurement": "W"})
+    hass.states.async_set(CIRCUIT_ENERGY, "1.0", {"unit_of_measurement": "kWh"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 23, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)  # last_raw_energy = 1.0
+
+    hass.states.async_set(CIRCUIT_ENERGY, "1.5", {"unit_of_measurement": "kWh"})
+    next_day = now + timedelta(hours=2)  # cruza medianoche
+    coordinator._recompute(next_day)
+
+    assert coordinator.nodes[circuit_id].energy["day"].last_closed_value == pytest.approx(0.0)
+    assert coordinator.nodes[circuit_id].energy["day"].value == pytest.approx(0.5)  # todo al día nuevo
+
+
+async def test_home_energy_uses_grid_import_energy_entity_when_configured(hass):
+    entry = _make_entry(hass, grid_import_energy=True)
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})
+    hass.states.async_set(GRID_ENERGY, "100.0", {"unit_of_measurement": "kWh"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)
+
+    hass.states.async_set(GRID_ENERGY, "100.62", {"unit_of_measurement": "kWh"})
+    coordinator._recompute(now + timedelta(hours=1))
+
+    assert coordinator.nodes[NODE_HOME].energy["day"].value == pytest.approx(0.62)
+
+
+async def test_last_raw_energy_survives_restart(hass):
+    """Sin esto, la primera lectura post-reinicio se trataría como "primera vez" y se perdería
+    el delta real del primer evento tras arrancar."""
+    entry = _make_entry_with_circuit_meter(hass)
+    circuit_id = next(iter(entry.subentries))
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set("sensor.termo_power", "1000", {"unit_of_measurement": "W"})
+    hass.states.async_set(CIRCUIT_ENERGY, "20.0", {"unit_of_measurement": "kWh"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)
+    await coordinator._async_save()
+
+    restarted = EnergyLedgerCoordinator(hass, entry)
+    later = now + timedelta(minutes=30)
+    await restarted._async_load(later)
+    restarted._ensure_nodes(later)
+    restarted._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    restarted._last_update = later
+
+    hass.states.async_set(CIRCUIT_ENERGY, "20.3", {"unit_of_measurement": "kWh"})
+    restarted._recompute(later + timedelta(minutes=1))
+
+    assert restarted.nodes[circuit_id].energy["day"].value == pytest.approx(0.3)
