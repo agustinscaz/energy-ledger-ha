@@ -260,3 +260,58 @@ async def test_no_compensation_tracked_without_sell_price_entity(hass):
     entry = _make_entry(hass, positive_is_export=True, sell_price=False)
     coordinator = EnergyLedgerCoordinator(hass, entry)
     assert coordinator.track_compensation is False
+
+
+# --- kWh por nodo (issue #1) --------------------------------------------------------------
+
+
+async def test_energy_accumulates_for_home_and_circuit_independent_of_import_status(hass):
+    """A diferencia del coste, el kWh de un circuito se integra siempre, aunque la casa esté
+    exportando (cost_rate=0 en ese instante, energy_rate no)."""
+    entry = _make_entry(hass, positive_is_export=True, circuits={"Termo": "sensor.termo_power"})
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set("sensor.termo_power", "2000", {"unit_of_measurement": "W"})
+    hass.states.async_set(GRID, "1000", {"unit_of_measurement": "W"})  # casa exportando
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    circuit_id = next(iter(entry.subentries))
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), circuit_id: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)  # fija tarifas, elapsed=0
+    coordinator._recompute(now + timedelta(hours=1))
+
+    assert coordinator.nodes[circuit_id].cost["day"].value == 0.0  # casa exportando => coste 0
+    assert coordinator.nodes[circuit_id].energy["day"].value == pytest.approx(2.0)  # 2kW * 1h
+    assert coordinator.nodes[NODE_HOME].energy["day"].value == pytest.approx(0.0)  # import_kw=0
+
+
+# --- Hueco de datos (issue #2) --------------------------------------------------------------
+
+
+async def test_grid_unavailable_freezes_rates_and_marks_gap(hass):
+    entry = _make_entry(hass, positive_is_export=True)
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})  # importando 1kW
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)  # fija cost_rate=0.20€/h
+
+    assert coordinator.data_gap_since is None
+
+    hass.states.async_set(GRID, "unavailable")
+    later = now + timedelta(minutes=30)
+    coordinator._recompute(later)
+
+    assert coordinator.data_gap_since == later
+    # La tarifa queda congelada en la última válida, no se pisa con 0.
+    assert coordinator._last_rates[NODE_HOME][0] == pytest.approx(0.20)
+
+    hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})
+    coordinator._recompute(later + timedelta(minutes=5))
+    assert coordinator.data_gap_since is None

@@ -48,3 +48,8 @@ PERIOD_SUFFIX = {
 
 ATTR_LAST_CLOSED_PERIOD = "ultimo_periodo"
 ATTR_PERIOD_START = "fecha_inicio_periodo"
+
+# Se expone en los sensores del nodo casa/red (y de cada circuito, porque sus tarifas dependen de
+# la misma lectura) cuando grid_power_entity o buy_price_entity están unavailable/unknown: desde
+# cuándo está el dato "congelado" en la última tarifa válida. None cuando no hay hueco en curso.
+ATTR_DATA_GAP_SINCE = "datos_incompletos_desde"

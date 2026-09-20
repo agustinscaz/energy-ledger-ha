@@ -41,6 +41,9 @@ from .const import (
     SUBENTRY_TYPE_CIRCUIT,
 )
 
+# (cost_rate €/h, compensation_rate €/h, energy_rate kW) vigentes para un nodo.
+NodeRates = tuple[float, float, float]
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -91,6 +94,15 @@ def _new_accumulators(now: datetime) -> dict[str, PeriodAccumulator]:
     return {period: PeriodAccumulator(period_start=_period_start(period, now)) for period in PERIODS}
 
 
+def _load_accumulators(data: dict[str, Any], now: datetime) -> dict[str, PeriodAccumulator]:
+    """Reconstruye un dict de PeriodAccumulator desde storage, completando con acumuladores
+    nuevos (valor 0) cualquier período ausente en `data` — ver uso en _async_load."""
+    loaded = {p: PeriodAccumulator.from_dict(d) for p, d in data.items() if p in PERIODS}
+    for period in PERIODS:
+        loaded.setdefault(period, PeriodAccumulator(period_start=_period_start(period, now)))
+    return loaded
+
+
 def _advance_accumulators(accumulators: dict[str, PeriodAccumulator], now: datetime, elapsed_h: float, rate: float) -> None:
     """Cierra los períodos cuyo límite de calendario se cruzó y suma la contribución nueva.
 
@@ -114,9 +126,11 @@ def _advance_accumulators(accumulators: dict[str, PeriodAccumulator], now: datet
 @dataclass
 class NodeAccumulators:
     """Acumulados de un nodo (la casa/red, o un circuito). `compensation` es None para los
-    circuitos: un circuito nunca "gana" plata, solo cuesta 0 o el precio real."""
+    circuitos: un circuito nunca "gana" plata, solo cuesta 0 o el precio real. `energy` (kWh)
+    existe siempre: es la potencia del nodo integrada sola, sin multiplicar por precio."""
 
     cost: dict[str, PeriodAccumulator]
+    energy: dict[str, PeriodAccumulator]
     compensation: dict[str, PeriodAccumulator] | None = None
 
 
@@ -129,9 +143,12 @@ class EnergyLedgerCoordinator:
         self._store: Store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY_PREFIX}_{entry.entry_id}")
         self.nodes: dict[str, NodeAccumulators] = {}
         self._last_update: datetime | None = None
-        # node_id -> (tarifa de coste en €/h, tarifa de compensación en €/h). En memoria nomás:
-        # se recalcula desde los estados actuales en cada arranque, no hace falta persistirla.
-        self._last_rates: dict[str, tuple[float, float]] = {}
+        # node_id -> NodeRates. En memoria nomás: se recalcula desde los estados actuales en cada
+        # arranque, no hace falta persistirla.
+        self._last_rates: dict[str, NodeRates] = {}
+        # Desde cuándo grid_power_entity o buy_price_entity están unavailable/unknown y por lo
+        # tanto _last_rates está "congelado" en su último valor válido. None si no hay hueco.
+        self._data_gap_since: datetime | None = None
         self._listeners: list[Callable[[], None]] = []
         self._unsub_state: Callable[[], None] | None = None
         self._unsub_interval: Callable[[], None] | None = None
@@ -139,6 +156,10 @@ class EnergyLedgerCoordinator:
     @property
     def track_compensation(self) -> bool:
         return bool(self.entry.data.get(CONF_SELL_PRICE_ENTITY))
+
+    @property
+    def data_gap_since(self) -> datetime | None:
+        return self._data_gap_since
 
     def _circuit_subentry_ids(self) -> list[str]:
         return [sub_id for sub_id, sub in self.entry.subentries.items() if sub.subentry_type == SUBENTRY_TYPE_CIRCUIT]
@@ -154,11 +175,11 @@ class EnergyLedgerCoordinator:
         return ids
 
     async def async_setup(self) -> None:
-        await self._async_load()
         now = dt_util.now()
+        await self._async_load(now)
         self._ensure_nodes(now)
         self._last_update = now
-        self._last_rates = {node_id: (0.0, 0.0) for node_id in self.nodes}
+        self._last_rates = {node_id: (0.0, 0.0, 0.0) for node_id in self.nodes}
         # Cálculo inicial con elapsed=0: fija la tarifa vigente de cada nodo para el próximo
         # evento real, sin inventar consumo del tiempo que HA estuvo apagado.
         self._recompute(now)
@@ -199,6 +220,7 @@ class EnergyLedgerCoordinator:
             if node_id not in self.nodes:
                 self.nodes[node_id] = NodeAccumulators(
                     cost=_new_accumulators(now),
+                    energy=_new_accumulators(now),
                     compensation=_new_accumulators(now) if node_id == NODE_HOME else None,
                 )
         # Si se borró un circuito, se borra también su nodo — los subentry_id no se reutilizan
@@ -228,31 +250,41 @@ class EnergyLedgerCoordinator:
             elapsed_h = max((now - self._last_update).total_seconds() / 3600, 0.0)
 
         for node_id, node in self.nodes.items():
-            cost_rate, compensation_rate = self._last_rates.get(node_id, (0.0, 0.0))
+            cost_rate, compensation_rate, energy_rate = self._last_rates.get(node_id, (0.0, 0.0, 0.0))
             _advance_accumulators(node.cost, now, elapsed_h, cost_rate)
             if node.compensation is not None:
                 _advance_accumulators(node.compensation, now, elapsed_h, compensation_rate)
+            _advance_accumulators(node.energy, now, elapsed_h, energy_rate)
 
         self._last_update = now
-        self._recompute_rates()
+        self._recompute_rates(now)
 
-    def _recompute_rates(self) -> None:
+    def _recompute_rates(self, now: datetime) -> None:
         """Tarifa efectiva = precio de compra si la casa importa, 0 si no (autoconsumo/excedente).
         La tarifa de CADA nodo es esa tarifa efectiva multiplicada por SU potencia, en €/h — es lo
-        que _advance_accumulators integra sobre el tiempo transcurrido."""
-        grid_power = self._read_float(self.entry.data[CONF_GRID_POWER_ENTITY])
-        buy_price = self._read_float(self.entry.data[CONF_BUY_PRICE_ENTITY]) or 0.0
-        positive_is_export = self.entry.data.get(CONF_POSITIVE_IS_EXPORT, DEFAULT_POSITIVE_IS_EXPORT)
+        que _advance_accumulators integra sobre el tiempo transcurrido. El kWh de cada nodo es esa
+        misma potencia sola, sin multiplicar por precio.
 
-        import_kw = 0.0
-        export_kw = 0.0
-        if grid_power is not None:
-            if positive_is_export:
-                import_kw = max(-grid_power, 0.0) / 1000
-                export_kw = max(grid_power, 0.0) / 1000
-            else:
-                import_kw = max(grid_power, 0.0) / 1000
-                export_kw = max(-grid_power, 0.0) / 1000
+        Si grid_power_entity o buy_price_entity están unavailable/unknown, NO se pisa
+        self._last_rates con ceros (eso sería indistinguible de "casa exportando/autoconsumiendo
+        al 100%") — se deja la última tarifa válida congelada y se marca el hueco en
+        self._data_gap_since, ver ATTR_DATA_GAP_SINCE en sensor.py."""
+        grid_power = self._read_float(self.entry.data[CONF_GRID_POWER_ENTITY])
+        buy_price = self._read_float(self.entry.data[CONF_BUY_PRICE_ENTITY])
+
+        if grid_power is None or buy_price is None:
+            if self._data_gap_since is None:
+                self._data_gap_since = now
+            return
+        self._data_gap_since = None
+
+        positive_is_export = self.entry.data.get(CONF_POSITIVE_IS_EXPORT, DEFAULT_POSITIVE_IS_EXPORT)
+        if positive_is_export:
+            import_kw = max(-grid_power, 0.0) / 1000
+            export_kw = max(grid_power, 0.0) / 1000
+        else:
+            import_kw = max(grid_power, 0.0) / 1000
+            export_kw = max(-grid_power, 0.0) / 1000
 
         effective_price = buy_price if import_kw > 0 else 0.0
         home_cost_rate = effective_price * import_kw
@@ -260,14 +292,14 @@ class EnergyLedgerCoordinator:
         sell_price = self._read_float(self.entry.data.get(CONF_SELL_PRICE_ENTITY)) or 0.0
         home_compensation_rate = sell_price * export_kw
 
-        self._last_rates[NODE_HOME] = (home_cost_rate, home_compensation_rate)
+        self._last_rates[NODE_HOME] = (home_cost_rate, home_compensation_rate, import_kw)
 
         for sub_id, sub in self.entry.subentries.items():
             if sub.subentry_type != SUBENTRY_TYPE_CIRCUIT:
                 continue
             circuit_power = self._read_float(sub.data[CONF_CIRCUIT_POWER_ENTITY])
             circuit_kw = max(circuit_power, 0.0) / 1000 if circuit_power is not None else 0.0
-            self._last_rates[sub_id] = (effective_price * circuit_kw, 0.0)
+            self._last_rates[sub_id] = (effective_price * circuit_kw, 0.0, circuit_kw)
 
     def _read_float(self, entity_id: str | None) -> float | None:
         if not entity_id:
@@ -281,19 +313,19 @@ class EnergyLedgerCoordinator:
             _LOGGER.debug("Estado no numérico de %s: %r", entity_id, state.state)
             return None
 
-    async def _async_load(self) -> None:
+    async def _async_load(self, now: datetime) -> None:
         stored = await self._store.async_load()
         if not stored:
             return
         for node_id, node_data in stored.get("nodes", {}).items():
-            cost = {p: PeriodAccumulator.from_dict(d) for p, d in node_data.get("cost", {}).items() if p in PERIODS}
+            cost = _load_accumulators(node_data.get("cost", {}), now)
+            # "energy" no existía en versiones previas del storage: los períodos que falten
+            # arrancan en 0 en vez de romper la carga (mismo criterio de cero honesto, no de
+            # backfill inventado).
+            energy = _load_accumulators(node_data.get("energy", {}), now)
             compensation_data = node_data.get("compensation")
-            compensation = (
-                {p: PeriodAccumulator.from_dict(d) for p, d in compensation_data.items() if p in PERIODS}
-                if compensation_data is not None
-                else None
-            )
-            self.nodes[node_id] = NodeAccumulators(cost=cost, compensation=compensation)
+            compensation = _load_accumulators(compensation_data, now) if compensation_data is not None else None
+            self.nodes[node_id] = NodeAccumulators(cost=cost, energy=energy, compensation=compensation)
 
     async def _async_save(self) -> None:
         await self._store.async_save(self._to_storage_dict())
@@ -303,6 +335,7 @@ class EnergyLedgerCoordinator:
             "nodes": {
                 node_id: {
                     "cost": {p: acc.to_dict() for p, acc in node.cost.items()},
+                    "energy": {p: acc.to_dict() for p, acc in node.energy.items()},
                     "compensation": (
                         {p: acc.to_dict() for p, acc in node.compensation.items()}
                         if node.compensation is not None
@@ -311,4 +344,18 @@ class EnergyLedgerCoordinator:
                 }
                 for node_id, node in self.nodes.items()
             }
+        }
+
+    def diagnostics_snapshot(self) -> dict[str, Any]:
+        """Usado por diagnostics.py: estado interno completo del coordinator para poder resolver
+        "¿por qué este número no cuadra?" bajando un JSON en vez de pedir logs/acceso a la
+        instancia real (ver issue #3)."""
+        return {
+            "nodes": self._to_storage_dict()["nodes"],
+            "last_update": self._last_update.isoformat() if self._last_update else None,
+            "last_rates": {
+                node_id: {"cost_rate": cost_rate, "compensation_rate": compensation_rate, "energy_rate": energy_rate}
+                for node_id, (cost_rate, compensation_rate, energy_rate) in self._last_rates.items()
+            },
+            "data_gap_since": self._data_gap_since.isoformat() if self._data_gap_since else None,
         }

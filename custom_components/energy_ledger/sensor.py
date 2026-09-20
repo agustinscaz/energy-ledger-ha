@@ -13,6 +13,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import (
+    ATTR_DATA_GAP_SINCE,
     ATTR_LAST_CLOSED_PERIOD,
     ATTR_PERIOD_START,
     CONF_BUY_PRICE_ENTITY,
@@ -47,6 +48,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     home_entities: list[SensorEntity] = []
     for period in PERIODS:
         home_entities.append(LedgerCostSensor(coordinator, entry, NODE_HOME, period, currency, home_device))
+        home_entities.append(LedgerEnergySensor(coordinator, entry, NODE_HOME, period, home_device))
         if coordinator.track_compensation:
             home_entities.append(LedgerCompensationSensor(coordinator, entry, NODE_HOME, period, currency, home_device))
             home_entities.append(LedgerBalanceSensor(coordinator, entry, NODE_HOME, period, currency, home_device))
@@ -61,9 +63,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             manufacturer="Energy Ledger",
             via_device=(DOMAIN, entry.entry_id),
         )
-        circuit_entities = [
-            LedgerCostSensor(coordinator, entry, sub_id, period, currency, circuit_device) for period in PERIODS
-        ]
+        circuit_entities: list[SensorEntity] = []
+        for period in PERIODS:
+            circuit_entities.append(LedgerCostSensor(coordinator, entry, sub_id, period, currency, circuit_device))
+            circuit_entities.append(LedgerEnergySensor(coordinator, entry, sub_id, period, circuit_device))
         async_add_entities(circuit_entities, config_subentry_id=sub_id)
 
 
@@ -73,7 +76,6 @@ class _LedgerSensorBase(SensorEntity):
 
     _attr_has_entity_name = True
     _attr_should_poll = False
-    _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.TOTAL
 
     def __init__(
@@ -82,17 +84,19 @@ class _LedgerSensorBase(SensorEntity):
         entry: ConfigEntry,
         node_id: str,
         period: str,
-        currency: str,
+        unit: str,
         device_info: DeviceInfo,
         kind: str,
+        device_class: SensorDeviceClass = SensorDeviceClass.MONETARY,
     ) -> None:
         self.coordinator = coordinator
         self._node_id = node_id
         self._period = period
-        self._attr_native_unit_of_measurement = currency
+        self._attr_native_unit_of_measurement = unit
         self._attr_device_info = device_info
         self._attr_unique_id = f"{entry.entry_id}_{node_id}_{kind}_{period}"
         self._attr_translation_key = f"{kind}_{period}"
+        self._attr_device_class = device_class
         self._remove_listener: callable | None = None
 
     async def async_added_to_hass(self) -> None:
@@ -119,6 +123,9 @@ class _LedgerSensorBase(SensorEntity):
         return {
             ATTR_LAST_CLOSED_PERIOD: round(acc.last_closed_value, 4) if acc.last_closed_value is not None else None,
             ATTR_PERIOD_START: acc.period_start.isoformat() if acc.period_start else None,
+            ATTR_DATA_GAP_SINCE: (
+                self.coordinator.data_gap_since.isoformat() if self.coordinator.data_gap_since else None
+            ),
         }
 
 
@@ -131,6 +138,21 @@ class LedgerCostSensor(_LedgerSensorBase):
     def _period_accumulator(self) -> PeriodAccumulator | None:
         node = self.coordinator.nodes.get(self._node_id)
         return node.cost.get(self._period) if node else None
+
+
+class LedgerEnergySensor(_LedgerSensorBase):
+    """kWh acumulados del nodo (casa o circuito) en el período — la potencia integrada sola, sin
+    multiplicar por precio. A diferencia del coste, se acumula siempre (no solo mientras la casa
+    importa): es el consumo real del nodo, no lo que costó."""
+
+    def __init__(self, coordinator, entry, node_id, period, device_info) -> None:
+        super().__init__(
+            coordinator, entry, node_id, period, "kWh", device_info, kind="energy", device_class=SensorDeviceClass.ENERGY
+        )
+
+    def _period_accumulator(self) -> PeriodAccumulator | None:
+        node = self.coordinator.nodes.get(self._node_id)
+        return node.energy.get(self._period) if node else None
 
 
 class LedgerCompensationSensor(_LedgerSensorBase):
@@ -176,4 +198,7 @@ class LedgerBalanceSensor(_LedgerSensorBase):
         return {
             ATTR_LAST_CLOSED_PERIOD: last_closed,
             ATTR_PERIOD_START: cost.period_start.isoformat() if cost.period_start else None,
+            ATTR_DATA_GAP_SINCE: (
+                self.coordinator.data_gap_since.isoformat() if self.coordinator.data_gap_since else None
+            ),
         }
