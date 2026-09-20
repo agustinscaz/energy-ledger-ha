@@ -4,6 +4,7 @@ persistencia entre reinicios — el núcleo de todo el proyecto (ver README, sec
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -24,6 +25,7 @@ from custom_components.energy_ledger.const import (
     ENERGY_METHOD_INTEGRATED,
     ENERGY_METHOD_METER,
     NODE_HOME,
+    STORAGE_SAVE_DELAY_SECONDS,
     SUBENTRY_TYPE_CIRCUIT,
 )
 from custom_components.energy_ledger.coordinator import (
@@ -687,3 +689,36 @@ async def test_cost_method_is_none_for_home_node(hass):
     entry = _make_entry(hass, home_load=True, circuits={"Termo": "sensor.termo_power"})
     coordinator = EnergyLedgerCoordinator(hass, entry)
     assert coordinator.cost_method(NODE_HOME) is None
+
+
+# --- Debounce de Store.async_save (issue #10) --------------------------------------------------
+
+
+async def test_recompute_and_save_debounces_via_store_delay_save(hass):
+    """Un evento de estado (potencia actualizando cada pocos segundos con un circuito activo) no
+    debe disparar una escritura completa a disco — solo programa un guardado debounced."""
+    entry = _make_entry(hass)
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_update = now
+    coordinator._store.async_delay_save = MagicMock()
+    coordinator._store.async_save = AsyncMock()
+
+    await coordinator._async_recompute_and_save(now + timedelta(minutes=1))
+
+    coordinator._store.async_delay_save.assert_called_once_with(coordinator._to_storage_dict, STORAGE_SAVE_DELAY_SECONDS)
+    coordinator._store.async_save.assert_not_called()
+
+
+async def test_async_unload_flushes_pending_save_immediately(hass):
+    """Si HA se apaga justo después de un cambio reciente y antes de que venza el delay del
+    debounce, no se pierde el último tramo de acumulado — async_unload fuerza un flush."""
+    entry = _make_entry(hass)
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    coordinator._store.async_save = AsyncMock()
+    coordinator._store.async_delay_save = MagicMock()
+
+    await coordinator.async_unload()
+
+    coordinator._store.async_save.assert_awaited_once_with(coordinator._to_storage_dict())

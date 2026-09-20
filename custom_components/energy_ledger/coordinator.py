@@ -44,6 +44,7 @@ from .const import (
     NODE_HOME,
     PERIODS,
     STORAGE_KEY_PREFIX,
+    STORAGE_SAVE_DELAY_SECONDS,
     STORAGE_VERSION,
     SUBENTRY_TYPE_CIRCUIT,
 )
@@ -255,13 +256,17 @@ class EnergyLedgerCoordinator:
             self.hass, self._handle_interval, timedelta(seconds=BACKGROUND_UPDATE_INTERVAL_SECONDS)
         )
 
-    def async_unload(self) -> None:
+    async def async_unload(self) -> None:
         if self._unsub_state is not None:
             self._unsub_state()
             self._unsub_state = None
         if self._unsub_interval is not None:
             self._unsub_interval()
             self._unsub_interval = None
+        # Flush final inmediato (#10): si había un guardado debounced pendiente de
+        # _async_recompute_and_save, no perder el último tramo de acumulado por descargar la
+        # integración antes de que venza el delay. Store.async_save cancela el delay pendiente.
+        await self._async_save()
 
     def async_add_listener(self, update_callback: Callable[[], None]) -> Callable[[], None]:
         """Se usa igual que en DataUpdateCoordinator: las entidades se suscriben con
@@ -308,7 +313,12 @@ class EnergyLedgerCoordinator:
 
     async def _async_recompute_and_save(self, now: datetime) -> None:
         self._recompute(now)
-        await self._async_save()
+        # Debounced (#10), no escritura inmediata: con actividad sostenida (un circuito cuyo
+        # sensor de potencia actualiza cada pocos segundos) esto evita una escritura completa a
+        # disco por evento. Store arma el dict recién cuando efectivamente escribe, así que
+        # siempre serializa el estado más reciente aunque hayan pasado varios recompute entre
+        # medio. El flush final al descargar la integración está en async_unload.
+        self._store.async_delay_save(self._to_storage_dict, STORAGE_SAVE_DELAY_SECONDS)
         self._notify_listeners()
 
     def _recompute(self, now: datetime) -> None:

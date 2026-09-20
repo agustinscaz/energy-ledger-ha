@@ -34,6 +34,11 @@ DEFAULT_POSITIVE_IS_EXPORT = True
 # cambios de estado durante horas: sin este tick, el coste dejaría de acumularse aunque la casa
 # siga importando, porque el coordinator solo recalcula al reaccionar a eventos de estado.
 BACKGROUND_UPDATE_INTERVAL_SECONDS = 60
+# Debounce de Store.async_delay_save (ver issue #10): con un circuito activo el sensor de
+# potencia puede actualizar cada pocos segundos, y sin debounce cada evento dispara una escritura
+# completa a disco. Un delay corto sigue sin perder nada real entre reinicios (lo único que le
+# importa a esta integración) sin escribir en cada tick.
+STORAGE_SAVE_DELAY_SECONDS = 10
 
 STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = f"{DOMAIN}_ledger"
