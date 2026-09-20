@@ -9,6 +9,10 @@ CONF_GRID_POWER_ENTITY = "grid_power_entity"
 CONF_POSITIVE_IS_EXPORT = "positive_is_export"
 CONF_BUY_PRICE_ENTITY = "buy_price_entity"
 CONF_SELL_PRICE_ENTITY = "sell_price_entity"
+# Opcional: potencia de consumo TOTAL de la casa (W), no solo import/export de red. Sin esto no se
+# puede derivar autoconsumo (autoconsumo_kw = load_kw - import_kw), así que el sensor de ahorro
+# (ver issue #6) solo se crea si está configurado.
+CONF_HOME_LOAD_POWER_ENTITY = "home_load_power_entity"
 
 # Claves de subentry.data (subentries de tipo "circuit", repetibles, uno por electrodoméstico).
 CONF_CIRCUIT_NAME = "name"

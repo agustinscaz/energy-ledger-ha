@@ -30,6 +30,7 @@ from .const import (
     CONF_BUY_PRICE_ENTITY,
     CONF_CIRCUIT_POWER_ENTITY,
     CONF_GRID_POWER_ENTITY,
+    CONF_HOME_LOAD_POWER_ENTITY,
     CONF_POSITIVE_IS_EXPORT,
     CONF_SELL_PRICE_ENTITY,
     DEFAULT_POSITIVE_IS_EXPORT,
@@ -127,11 +128,14 @@ def _advance_accumulators(accumulators: dict[str, PeriodAccumulator], now: datet
 class NodeAccumulators:
     """Acumulados de un nodo (la casa/red, o un circuito). `compensation` es None para los
     circuitos: un circuito nunca "gana" plata, solo cuesta 0 o el precio real. `energy` (kWh)
-    existe siempre: es la potencia del nodo integrada sola, sin multiplicar por precio."""
+    existe siempre: es la potencia del nodo integrada sola, sin multiplicar por precio. `savings`
+    (ahorro por autoconsumo) solo existe para la casa, y solo si hay home_load_power_entity
+    configurado (ver issue #6) — un circuito individual no tiene "ahorro" propio."""
 
     cost: dict[str, PeriodAccumulator]
     energy: dict[str, PeriodAccumulator]
     compensation: dict[str, PeriodAccumulator] | None = None
+    savings: dict[str, PeriodAccumulator] | None = None
 
 
 class EnergyLedgerCoordinator:
@@ -149,6 +153,9 @@ class EnergyLedgerCoordinator:
         # Desde cuándo grid_power_entity o buy_price_entity están unavailable/unknown y por lo
         # tanto _last_rates está "congelado" en su último valor válido. None si no hay hueco.
         self._data_gap_since: datetime | None = None
+        # Tarifa de ahorro (€/h) vigente para la casa. Separada de _last_rates (que es por nodo y
+        # todo nodo la tiene) porque el ahorro es un concepto exclusivo de la casa y opcional.
+        self._last_savings_rate: float = 0.0
         self._listeners: list[Callable[[], None]] = []
         self._unsub_state: Callable[[], None] | None = None
         self._unsub_interval: Callable[[], None] | None = None
@@ -156,6 +163,10 @@ class EnergyLedgerCoordinator:
     @property
     def track_compensation(self) -> bool:
         return bool(self.entry.data.get(CONF_SELL_PRICE_ENTITY))
+
+    @property
+    def track_savings(self) -> bool:
+        return bool(self.entry.data.get(CONF_HOME_LOAD_POWER_ENTITY))
 
     @property
     def data_gap_since(self) -> datetime | None:
@@ -169,6 +180,9 @@ class EnergyLedgerCoordinator:
         sell_price_entity = self.entry.data.get(CONF_SELL_PRICE_ENTITY)
         if sell_price_entity:
             ids.append(sell_price_entity)
+        home_load_power_entity = self.entry.data.get(CONF_HOME_LOAD_POWER_ENTITY)
+        if home_load_power_entity:
+            ids.append(home_load_power_entity)
         for sub in self.entry.subentries.values():
             if sub.subentry_type == SUBENTRY_TYPE_CIRCUIT:
                 ids.append(sub.data[CONF_CIRCUIT_POWER_ENTITY])
@@ -222,6 +236,7 @@ class EnergyLedgerCoordinator:
                     cost=_new_accumulators(now),
                     energy=_new_accumulators(now),
                     compensation=_new_accumulators(now) if node_id == NODE_HOME else None,
+                    savings=_new_accumulators(now) if node_id == NODE_HOME and self.track_savings else None,
                 )
         # Si se borró un circuito, se borra también su nodo — los subentry_id no se reutilizan
         # (uno nuevo siempre trae un id nuevo), así que no hay riesgo de "resucitar" acumulados
@@ -255,6 +270,8 @@ class EnergyLedgerCoordinator:
             if node.compensation is not None:
                 _advance_accumulators(node.compensation, now, elapsed_h, compensation_rate)
             _advance_accumulators(node.energy, now, elapsed_h, energy_rate)
+            if node.savings is not None:
+                _advance_accumulators(node.savings, now, elapsed_h, self._last_savings_rate)
 
         self._last_update = now
         self._recompute_rates(now)
@@ -294,6 +311,18 @@ class EnergyLedgerCoordinator:
 
         self._last_rates[NODE_HOME] = (home_cost_rate, home_compensation_rate, import_kw)
 
+        # Ahorro: solo si hay home_load_power_entity configurado (ver issue #6). Si el sensor
+        # de consumo total está unavailable/unknown, se congela la última tarifa de ahorro
+        # válida en vez de pisarla con 0 — mismo criterio que el hueco de #2, acotado a esta
+        # única entidad opcional (no toca self._data_gap_since, que es solo de grid/buy_price).
+        home_load_power_entity = self.entry.data.get(CONF_HOME_LOAD_POWER_ENTITY)
+        if home_load_power_entity:
+            load_power = self._read_float(home_load_power_entity)
+            if load_power is not None:
+                load_kw = max(load_power, 0.0) / 1000
+                autoconsumo_kw = max(load_kw - import_kw, 0.0)
+                self._last_savings_rate = autoconsumo_kw * buy_price + export_kw * sell_price
+
         for sub_id, sub in self.entry.subentries.items():
             if sub.subentry_type != SUBENTRY_TYPE_CIRCUIT:
                 continue
@@ -325,7 +354,9 @@ class EnergyLedgerCoordinator:
             energy = _load_accumulators(node_data.get("energy", {}), now)
             compensation_data = node_data.get("compensation")
             compensation = _load_accumulators(compensation_data, now) if compensation_data is not None else None
-            self.nodes[node_id] = NodeAccumulators(cost=cost, energy=energy, compensation=compensation)
+            savings_data = node_data.get("savings")
+            savings = _load_accumulators(savings_data, now) if savings_data is not None else None
+            self.nodes[node_id] = NodeAccumulators(cost=cost, energy=energy, compensation=compensation, savings=savings)
 
     async def _async_save(self) -> None:
         await self._store.async_save(self._to_storage_dict())
@@ -340,6 +371,9 @@ class EnergyLedgerCoordinator:
                         {p: acc.to_dict() for p, acc in node.compensation.items()}
                         if node.compensation is not None
                         else None
+                    ),
+                    "savings": (
+                        {p: acc.to_dict() for p, acc in node.savings.items()} if node.savings is not None else None
                     ),
                 }
                 for node_id, node in self.nodes.items()
@@ -358,4 +392,5 @@ class EnergyLedgerCoordinator:
                 for node_id, (cost_rate, compensation_rate, energy_rate) in self._last_rates.items()
             },
             "data_gap_since": self._data_gap_since.isoformat() if self._data_gap_since else None,
+            "last_savings_rate": self._last_savings_rate,
         }

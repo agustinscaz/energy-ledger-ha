@@ -21,6 +21,7 @@ from .const import (
     CONF_CIRCUIT_NAME,
     CONF_CIRCUIT_POWER_ENTITY,
     CONF_GRID_POWER_ENTITY,
+    CONF_HOME_LOAD_POWER_ENTITY,
     CONF_POSITIVE_IS_EXPORT,
     CONF_SELL_PRICE_ENTITY,
     DEFAULT_POSITIVE_IS_EXPORT,
@@ -36,6 +37,7 @@ STEP_USER_SCHEMA = vol.Schema(
         vol.Required(CONF_POSITIVE_IS_EXPORT, default=DEFAULT_POSITIVE_IS_EXPORT): bool,
         vol.Required(CONF_BUY_PRICE_ENTITY): _SENSOR_SELECTOR,
         vol.Optional(CONF_SELL_PRICE_ENTITY): _SENSOR_SELECTOR,
+        vol.Optional(CONF_HOME_LOAD_POWER_ENTITY): _SENSOR_SELECTOR,
     }
 )
 
@@ -55,6 +57,8 @@ class EnergyLedgerConfigFlow(ConfigFlow, domain=DOMAIN):
             data = dict(user_input)
             if not data.get(CONF_SELL_PRICE_ENTITY):
                 data.pop(CONF_SELL_PRICE_ENTITY, None)
+            if not data.get(CONF_HOME_LOAD_POWER_ENTITY):
+                data.pop(CONF_HOME_LOAD_POWER_ENTITY, None)
 
             return self.async_create_entry(title="Energy Ledger", data=data)
 

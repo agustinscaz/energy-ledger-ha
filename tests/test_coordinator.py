@@ -13,6 +13,7 @@ from custom_components.energy_ledger.const import (
     CONF_CIRCUIT_NAME,
     CONF_CIRCUIT_POWER_ENTITY,
     CONF_GRID_POWER_ENTITY,
+    CONF_HOME_LOAD_POWER_ENTITY,
     CONF_POSITIVE_IS_EXPORT,
     CONF_SELL_PRICE_ENTITY,
     DOMAIN,
@@ -31,9 +32,10 @@ from homeassistant.util import dt as dt_util
 GRID = "sensor.grid_power"
 BUY = "sensor.buy_price"
 SELL = "sensor.sell_price"
+LOAD = "sensor.home_load"
 
 
-def _make_entry(hass, *, positive_is_export=True, sell_price=False, circuits=None):
+def _make_entry(hass, *, positive_is_export=True, sell_price=False, home_load=False, circuits=None):
     data = {
         CONF_GRID_POWER_ENTITY: GRID,
         CONF_POSITIVE_IS_EXPORT: positive_is_export,
@@ -41,6 +43,8 @@ def _make_entry(hass, *, positive_is_export=True, sell_price=False, circuits=Non
     }
     if sell_price:
         data[CONF_SELL_PRICE_ENTITY] = SELL
+    if home_load:
+        data[CONF_HOME_LOAD_POWER_ENTITY] = LOAD
 
     subentries_data = [
         {
@@ -315,3 +319,82 @@ async def test_grid_unavailable_freezes_rates_and_marks_gap(hass):
     hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})
     coordinator._recompute(later + timedelta(minutes=5))
     assert coordinator.data_gap_since is None
+
+
+# --- Ahorro por autoconsumo (issue #6) -------------------------------------------------------
+
+
+async def test_no_savings_tracked_without_home_load_power_entity(hass):
+    entry = _make_entry(hass, positive_is_export=True)
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    assert coordinator.track_savings is False
+
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    assert coordinator.nodes[NODE_HOME].savings is None
+
+
+async def test_savings_equals_self_consumption_at_buy_price_plus_export_at_sell_price(hass):
+    """ahorro = autoconsumo_kw * precio_compra + export_kw * precio_venta, donde
+    autoconsumo_kw = max(load_kw - import_kw, 0). Load 3kW, import 1kW => autoconsumo 2kW."""
+    entry = _make_entry(hass, positive_is_export=True, sell_price=True, home_load=True)
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(SELL, "0.05", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(LOAD, "3000", {"unit_of_measurement": "W"})
+    hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})  # importando 1kW
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    assert coordinator.track_savings is True
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)  # fija la tarifa, elapsed=0
+
+    coordinator._recompute(now + timedelta(hours=1))
+
+    # autoconsumo_kw = max(3 - 1, 0) = 2kW; export_kw = 0 (importando) => ahorro = 2 * 0.20 = 0.40
+    assert coordinator.nodes[NODE_HOME].savings["day"].value == pytest.approx(0.40)
+
+
+async def test_savings_includes_export_compensation_when_exporting(hass):
+    """Casa exportando: import_kw=0, autoconsumo_kw = load_kw entero; export sí compensa."""
+    entry = _make_entry(hass, positive_is_export=True, sell_price=True, home_load=True)
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(SELL, "0.05", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(LOAD, "500", {"unit_of_measurement": "W"})
+    hass.states.async_set(GRID, "1500", {"unit_of_measurement": "W"})  # exportando 1.5kW
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)
+    coordinator._recompute(now + timedelta(hours=1))
+
+    # autoconsumo_kw = max(0.5 - 0, 0) = 0.5kW * 0.20 = 0.10; export 1.5kW * 0.05 = 0.075
+    assert coordinator.nodes[NODE_HOME].savings["day"].value == pytest.approx(0.175)
+
+
+async def test_savings_freezes_when_load_entity_unavailable(hass):
+    entry = _make_entry(hass, positive_is_export=True, home_load=True)
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(LOAD, "2000", {"unit_of_measurement": "W"})
+    hass.states.async_set(GRID, "-500", {"unit_of_measurement": "W"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0)}
+    coordinator._last_update = now
+    coordinator._recompute(now)
+    frozen_rate = coordinator._last_savings_rate
+    assert frozen_rate == pytest.approx(0.20 * 1.5)  # autoconsumo = 2 - 0.5 = 1.5kW
+
+    hass.states.async_set(LOAD, "unavailable")
+    coordinator._recompute(now + timedelta(minutes=30))
+
+    # No se pisa con 0: el hueco de home_load_power_entity no toca grid/buy, sigue sin gap global.
+    assert coordinator.data_gap_since is None
+    assert coordinator._last_savings_rate == pytest.approx(frozen_rate)

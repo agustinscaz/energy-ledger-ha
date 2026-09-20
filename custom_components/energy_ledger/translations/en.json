@@ -8,13 +8,15 @@
           "grid_power_entity": "Net grid power sensor (W)",
           "positive_is_export": "Positive = exporting (negative = importing)",
           "buy_price_entity": "Buy price sensor (currency/kWh)",
-          "sell_price_entity": "Surplus sell price sensor (currency/kWh, optional)"
+          "sell_price_entity": "Surplus sell price sensor (currency/kWh, optional)",
+          "home_load_power_entity": "Total home load power sensor (W, optional)"
         },
         "data_description": {
           "grid_power_entity": "E.g. sensor.goodwe_meter_active_power_total. Positive/negative according to the toggle below.",
           "positive_is_export": "Turn this off if your sensor uses the opposite convention (positive = importing).",
           "buy_price_entity": "The real-time price you pay for every kWh imported from the grid.",
-          "sell_price_entity": "Leave empty if you aren't compensated for surplus: compensation and balance won't be tracked."
+          "sell_price_entity": "Leave empty if you aren't compensated for surplus: compensation and balance won't be tracked.",
+          "home_load_power_entity": "Needed for the self-consumption savings sensor. Leave empty to skip it."
         }
       }
     },
@@ -60,7 +62,11 @@
       "balance_day": { "name": "Net balance today" },
       "balance_week": { "name": "Net balance this week" },
       "balance_month": { "name": "Net balance this month" },
-      "balance_year": { "name": "Net balance this year" }
+      "balance_year": { "name": "Net balance this year" },
+      "savings_day": { "name": "Savings today" },
+      "savings_week": { "name": "Savings this week" },
+      "savings_month": { "name": "Savings this month" },
+      "savings_year": { "name": "Savings this year" }
     }
   }
 }

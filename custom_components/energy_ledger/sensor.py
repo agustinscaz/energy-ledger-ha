@@ -52,6 +52,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         if coordinator.track_compensation:
             home_entities.append(LedgerCompensationSensor(coordinator, entry, NODE_HOME, period, currency, home_device))
             home_entities.append(LedgerBalanceSensor(coordinator, entry, NODE_HOME, period, currency, home_device))
+        if coordinator.track_savings:
+            home_entities.append(LedgerSavingsSensor(coordinator, entry, NODE_HOME, period, currency, home_device))
     async_add_entities(home_entities)
 
     for sub_id, sub in entry.subentries.items():
@@ -164,6 +166,19 @@ class LedgerCompensationSensor(_LedgerSensorBase):
     def _period_accumulator(self) -> PeriodAccumulator | None:
         node = self.coordinator.nodes.get(self._node_id)
         return node.compensation.get(self._period) if node and node.compensation else None
+
+
+class LedgerSavingsSensor(_LedgerSensorBase):
+    """Ahorro por autoconsumo — solo para el nodo casa/red y solo si hay
+    home_load_power_entity configurado (ver issue #6): autoconsumo_kw * precio_compra +
+    export_kw * precio_venta, donde autoconsumo_kw = max(load_kw - import_kw, 0)."""
+
+    def __init__(self, coordinator, entry, node_id, period, currency, device_info) -> None:
+        super().__init__(coordinator, entry, node_id, period, currency, device_info, kind="savings")
+
+    def _period_accumulator(self) -> PeriodAccumulator | None:
+        node = self.coordinator.nodes.get(self._node_id)
+        return node.savings.get(self._period) if node and node.savings else None
 
 
 class LedgerBalanceSensor(_LedgerSensorBase):

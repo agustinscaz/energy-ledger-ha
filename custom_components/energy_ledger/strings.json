@@ -8,13 +8,15 @@
           "grid_power_entity": "Sensor de potencia neta de red (W)",
           "positive_is_export": "Positivo = exportando (negativo = importando)",
           "buy_price_entity": "Sensor de precio de compra (€/kWh)",
-          "sell_price_entity": "Sensor de precio de venta de excedentes (€/kWh, opcional)"
+          "sell_price_entity": "Sensor de precio de venta de excedentes (€/kWh, opcional)",
+          "home_load_power_entity": "Sensor de potencia de consumo total de la casa (W, opcional)"
         },
         "data_description": {
           "grid_power_entity": "Ej. sensor.goodwe_meter_active_power_total. Positivo/negativo según lo que marques abajo.",
           "positive_is_export": "Desmarcá esto si tu sensor usa la convención contraria (positivo = importando).",
           "buy_price_entity": "El precio en tiempo real que pagás por cada kWh importado de la red.",
-          "sell_price_entity": "Dejalo vacío si no te compensan los excedentes: no se trackeará compensación ni balance."
+          "sell_price_entity": "Dejalo vacío si no te compensan los excedentes: no se trackeará compensación ni balance.",
+          "home_load_power_entity": "Necesario para el sensor de ahorro por autoconsumo. Dejalo vacío si no lo querés trackear."
         }
       }
     },
@@ -60,7 +62,11 @@
       "balance_day": { "name": "Balance neto hoy" },
       "balance_week": { "name": "Balance neto esta semana" },
       "balance_month": { "name": "Balance neto este mes" },
-      "balance_year": { "name": "Balance neto este año" }
+      "balance_year": { "name": "Balance neto este año" },
+      "savings_day": { "name": "Ahorro hoy" },
+      "savings_week": { "name": "Ahorro esta semana" },
+      "savings_month": { "name": "Ahorro este mes" },
+      "savings_year": { "name": "Ahorro este año" }
     }
   }
 }

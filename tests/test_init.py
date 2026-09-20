@@ -10,6 +10,7 @@ from custom_components.energy_ledger.const import (
     CONF_CIRCUIT_NAME,
     CONF_CIRCUIT_POWER_ENTITY,
     CONF_GRID_POWER_ENTITY,
+    CONF_HOME_LOAD_POWER_ENTITY,
     CONF_POSITIVE_IS_EXPORT,
     CONF_SELL_PRICE_ENTITY,
     DOMAIN,
@@ -98,3 +99,32 @@ async def test_setup_without_sell_price_skips_compensation_and_balance(hass):
     ent_reg = er.async_get(hass)
     all_entities = er.async_entries_for_config_entry(ent_reg, entry.entry_id)
     assert len(all_entities) == 8  # coste + energía, sin sell_price_entity
+
+
+async def test_setup_with_home_load_power_entity_creates_savings_sensors(hass):
+    hass.states.async_set("sensor.grid_power", "-1000", {"unit_of_measurement": "W"})
+    hass.states.async_set("sensor.buy_price", "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set("sensor.home_load", "2000", {"unit_of_measurement": "W"})
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_GRID_POWER_ENTITY: "sensor.grid_power",
+            CONF_POSITIVE_IS_EXPORT: True,
+            CONF_BUY_PRICE_ENTITY: "sensor.buy_price",
+            CONF_HOME_LOAD_POWER_ENTITY: "sensor.home_load",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    ent_reg = er.async_get(hass)
+    for period in ("day", "week", "month", "year"):
+        unique_id = f"{entry.entry_id}_home_savings_{period}"
+        entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, unique_id)
+        assert entity_id is not None, f"falta {unique_id}"
+
+    all_entities = er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+    assert len(all_entities) == 12  # coste + energía + ahorro, sin sell_price_entity
