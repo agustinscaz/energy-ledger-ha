@@ -82,11 +82,23 @@
   "services": {
     "start_cycle": {
       "name": "Start cycle",
-      "description": "Saves a start mark to compute the cost/energy of a cycle (e.g. a wash) when end_cycle is called afterwards."
+      "description": "Saves a start mark to compute the cost/energy of a cycle (e.g. a wash) when end_cycle is called afterwards.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "The circuit (or the home) to measure the cycle for."
+        }
+      }
     },
     "end_cycle": {
       "name": "End cycle",
-      "description": "Computes cost/energy since this device's last start_cycle and returns the result."
+      "description": "Computes cost/energy since this device's last start_cycle and returns the result.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "The same circuit (or home) used in start_cycle."
+        }
+      }
     }
   },
   "entity": {

@@ -6,12 +6,19 @@ from __future__ import annotations
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
+from .const import DOMAIN
 from .coordinator import EnergyLedgerCoordinator
 from .services import async_setup_services
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
+
+# hassfest lo exige para cualquier integración que implemente async_setup (acá: para registrar
+# los servicios start_cycle/end_cycle una sola vez a nivel de dominio, ver #13) — esta integración
+# solo se configura vía config entries, nunca vía YAML.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:

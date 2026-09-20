@@ -82,11 +82,23 @@
   "services": {
     "start_cycle": {
       "name": "Empezar ciclo",
-      "description": "Guarda una marca de inicio para calcular el coste/energía de un ciclo (ej. un lavado) al llamar a end_cycle después."
+      "description": "Guarda una marca de inicio para calcular el coste/energía de un ciclo (ej. un lavado) al llamar a end_cycle después.",
+      "fields": {
+        "device_id": {
+          "name": "Dispositivo",
+          "description": "El circuito (o la casa) del que se va a medir el ciclo."
+        }
+      }
     },
     "end_cycle": {
       "name": "Terminar ciclo",
-      "description": "Calcula el coste/energía desde el último start_cycle de este dispositivo y devuelve el resultado."
+      "description": "Calcula el coste/energía desde el último start_cycle de este dispositivo y devuelve el resultado.",
+      "fields": {
+        "device_id": {
+          "name": "Dispositivo",
+          "description": "El mismo circuito (o la casa) que se usó en start_cycle."
+        }
+      }
     }
   },
   "entity": {

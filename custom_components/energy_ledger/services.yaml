@@ -1,9 +1,15 @@
 start_cycle:
-  target:
-    device:
-      integration: energy_ledger
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: energy_ledger
 
 end_cycle:
-  target:
-    device:
-      integration: energy_ledger
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: energy_ledger
