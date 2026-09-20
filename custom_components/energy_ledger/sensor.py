@@ -204,6 +204,15 @@ class LedgerSavingsSensor(_LedgerSensorBase):
         node = self.coordinator.nodes.get(self._node_id)
         return node.savings.get(self._period) if node and node.savings else None
 
+    @property
+    def extra_state_attributes(self) -> dict[str, float | str | None]:
+        attrs = dict(super().extra_state_attributes)
+        # El gap relevante para el ahorro es el de home_load_power_entity, no el global de
+        # grid/buy_price que heredó de la clase base — son fuentes distintas (#12).
+        gap = self.coordinator.savings_gap_since
+        attrs[ATTR_DATA_GAP_SINCE] = gap.isoformat() if gap else None
+        return attrs
+
 
 class LedgerBalanceSensor(_LedgerSensorBase):
     """Balance neto = compensación − coste, para el nodo casa/red."""

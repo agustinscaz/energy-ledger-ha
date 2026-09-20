@@ -407,11 +407,17 @@ async def test_savings_freezes_when_load_entity_unavailable(hass):
     assert frozen_rate == pytest.approx(0.20 * 1.5)  # autoconsumo = 2 - 0.5 = 1.5kW
 
     hass.states.async_set(LOAD, "unavailable")
-    coordinator._recompute(now + timedelta(minutes=30))
+    later = now + timedelta(minutes=30)
+    coordinator._recompute(later)
 
     # No se pisa con 0: el hueco de home_load_power_entity no toca grid/buy, sigue sin gap global.
     assert coordinator.data_gap_since is None
     assert coordinator._last_savings_rate == pytest.approx(frozen_rate)
+    assert coordinator.savings_gap_since == later  # #12: faltaba este gap-tracking
+
+    hass.states.async_set(LOAD, "2000", {"unit_of_measurement": "W"})
+    coordinator._recompute(later + timedelta(minutes=5))
+    assert coordinator.savings_gap_since is None
 
 
 # --- kWh exacto desde contador real (issue #7) ------------------------------------------------
@@ -639,6 +645,41 @@ async def test_circuit_cost_shared_never_exceeds_home_cost_with_concurrent_circu
     expected_each = 0.05 * 0.20 * (2.0 / 6.05)
     for cid in circuit_ids:
         assert coordinator.nodes[cid].cost["day"].value == pytest.approx(expected_each, rel=1e-3)
+
+
+async def test_circuit_cost_normalizes_when_sum_of_circuits_exceeds_load_kw(hass):
+    """#12: ruido de medición entre sensores que no leen exactamente en el mismo instante puede
+    hacer que la SUMA de circuit_kw supere load_kw aunque cada uno individualmente esté por
+    debajo — acá 2 circuitos de 3kW cada uno (6kW) contra un load_kw de solo 5.9kW medido un
+    instante distinto. Sin normalizar la suma, cada uno se clampearía a min(3/5.9,1)=0.508 y la
+    suma dejaría cerca de 1.017 del coste real "facturado". Con la normalización, la suma da
+    exactamente el coste real de la casa (import_kw), ni un centavo más."""
+    entry = _make_entry(
+        hass, positive_is_export=True, home_load=True, circuits={"A": "sensor.circuito_a", "B": "sensor.circuito_b"}
+    )
+    circuit_ids = list(entry.subentries)
+    hass.states.async_set(BUY, "0.20", {"unit_of_measurement": "EUR/kWh"})
+    hass.states.async_set(GRID, "-1000", {"unit_of_measurement": "W"})  # importando 1kW
+    hass.states.async_set(LOAD, "5900", {"unit_of_measurement": "W"})  # 5.9kW, MENOS que la suma de los circuitos
+    hass.states.async_set("sensor.circuito_a", "3000", {"unit_of_measurement": "W"})
+    hass.states.async_set("sensor.circuito_b", "3000", {"unit_of_measurement": "W"})
+
+    coordinator = EnergyLedgerCoordinator(hass, entry)
+    now = datetime(2026, 3, 2, 10, 0, tzinfo=dt_util.UTC)
+    coordinator._ensure_nodes(now)
+    coordinator._last_rates = {NODE_HOME: (0.0, 0.0, 0.0), **{cid: (0.0, 0.0, 0.0) for cid in circuit_ids}}
+    coordinator._last_update = now
+    coordinator._recompute(now)
+    coordinator._recompute(now + timedelta(hours=1))
+
+    home_cost = coordinator.nodes[NODE_HOME].cost["day"].value
+    circuits_total = sum(coordinator.nodes[cid].cost["day"].value for cid in circuit_ids)
+    assert home_cost == pytest.approx(1.0 * 0.20)  # 1kW * 1h * 0.20€/kWh
+    # La normalización hace que la suma dé EXACTAMENTE el coste real, no solo "no lo supere".
+    assert circuits_total == pytest.approx(home_cost, rel=1e-9)
+    # Circuitos iguales (3kW cada uno) → reparto 50/50 del coste real.
+    for cid in circuit_ids:
+        assert coordinator.nodes[cid].cost["day"].value == pytest.approx(home_cost / 2, rel=1e-9)
 
 
 async def test_circuit_cost_falls_back_to_unshared_without_home_load_power_entity(hass):

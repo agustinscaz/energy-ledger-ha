@@ -177,6 +177,10 @@ class EnergyLedgerCoordinator:
         # el coste del nodo casa/red no tiene este concepto, se calcula directo sobre el import
         # real. En memoria nomás, igual que _last_rates: se recalcula en cada ciclo.
         self._last_cost_method: dict[str, str] = {}
+        # Desde cuándo home_load_power_entity está unavailable/unknown (ver issue #12: faltaba
+        # este gap-tracking, a diferencia de data_gap_since y energy_gap_since que ya lo tienen
+        # para sus respectivas fuentes). No persistido, mismo criterio que los otros dos.
+        self._savings_gap_since: datetime | None = None
         self._listeners: list[Callable[[], None]] = []
         self._unsub_state: Callable[[], None] | None = None
         self._unsub_interval: Callable[[], None] | None = None
@@ -215,6 +219,10 @@ class EnergyLedgerCoordinator:
         if node_id == NODE_HOME:
             return None
         return self._last_cost_method.get(node_id, COST_METHOD_UNSHARED)
+
+    @property
+    def savings_gap_since(self) -> datetime | None:
+        return self._savings_gap_since
 
     def _circuit_subentry_ids(self) -> list[str]:
         return [sub_id for sub_id, sub in self.entry.subentries.items() if sub.subentry_type == SUBENTRY_TYPE_CIRCUIT]
@@ -413,39 +421,53 @@ class EnergyLedgerCoordinator:
         # de consumo total está unavailable/unknown, se congela la última tarifa de ahorro
         # válida en vez de pisarla con 0 — mismo criterio que el hueco de #2, acotado a esta
         # única entidad opcional (no toca self._data_gap_since, que es solo de grid/buy_price).
+        # Marca su propio hueco en _savings_gap_since (#12: faltaba, a diferencia de
+        # data_gap_since/energy_gap_since que ya lo tienen para sus fuentes).
         # load_kw se reutiliza abajo para repartir el coste entre circuitos concurrentes (#9).
         home_load_power_entity = self.entry.data.get(CONF_HOME_LOAD_POWER_ENTITY)
         load_kw: float | None = None
         if home_load_power_entity:
             load_power = self._read_float(home_load_power_entity)
-            if load_power is not None:
+            if load_power is None:
+                if self._savings_gap_since is None:
+                    self._savings_gap_since = now
+            else:
+                self._savings_gap_since = None
                 load_kw = max(load_power, 0.0) / 1000
                 autoconsumo_kw = max(load_kw - import_kw, 0.0)
                 self._last_savings_rate = autoconsumo_kw * buy_price + export_kw * sell_price
 
+        circuit_kws: dict[str, float] = {}
         for sub_id, sub in self.entry.subentries.items():
             if sub.subentry_type != SUBENTRY_TYPE_CIRCUIT:
                 continue
             circuit_power = self._read_float(sub.data[CONF_CIRCUIT_POWER_ENTITY])
-            circuit_kw = max(circuit_power, 0.0) / 1000 if circuit_power is not None else 0.0
+            circuit_kws[sub_id] = max(circuit_power, 0.0) / 1000 if circuit_power is not None else 0.0
 
-            # effective_price*circuit_kw es un gate binario por CASA aplicado entero a CADA
-            # circuito por separado — si hay 3 circuitos de 2kW y la casa importa apenas 50W,
-            # los 3 se cobran a precio completo por sus 2kW enteros (6kW "facturados" cuando la
-            # red solo puso 50W). Con home_load_power_entity se puede repartir el import real
-            # proporcionalmente a lo que pesa cada circuito sobre el consumo total medido, así
-            # la suma de todos los circuitos nunca supera el coste real de la casa. Sin esa
-            # entidad (o con load_kw <= 0, sensor en 0 pese a estar disponible) se cae al
-            # comportamiento binario original — sobreestima conocida, ver ATTR_COST_METHOD.
-            if load_kw is not None and import_kw > 0 and load_kw > 0:
-                circuit_import_share_kw = import_kw * min(circuit_kw / load_kw, 1.0)
-                circuit_cost_rate = buy_price * circuit_import_share_kw
+        # effective_price*circuit_kw es un gate binario por CASA aplicado entero a CADA circuito
+        # por separado — si hay 3 circuitos de 2kW y la casa importa apenas 50W, los 3 se cobran
+        # a precio completo por sus 2kW enteros (6kW "facturados" cuando la red solo puso 50W).
+        # Con home_load_power_entity se puede repartir el import real proporcionalmente a lo que
+        # pesa cada circuito sobre el consumo total medido. Sin esa entidad (o con load_kw <= 0)
+        # se cae al comportamiento binario original — sobreestima conocida, ver ATTR_COST_METHOD.
+        if load_kw is not None and import_kw > 0 and load_kw > 0:
+            # scale normaliza la SUMA de todos los circuitos contra load_kw en un solo paso — no
+            # alcanza con clampear cada circuito por separado contra load_kw (#9 original): si la
+            # SUMA de varios circuitos concurrentes supera load_kw por ruido de medición entre
+            # sensores que no leen exactamente en el mismo instante, sin esto la suma de costes
+            # repartidos podría seguir superando levemente el coste real de la casa (#12). Con
+            # scale, cada circuito pesa circuit_kw/total_circuit_kw cuando el total excede
+            # load_kw — la suma de las razones da exactamente 1.0, nunca más.
+            total_circuit_kw = sum(circuit_kws.values())
+            scale = min(load_kw / total_circuit_kw, 1.0) if total_circuit_kw > 0 else 1.0
+            for sub_id, circuit_kw in circuit_kws.items():
+                circuit_import_share_kw = import_kw * circuit_kw * scale / load_kw
+                self._last_rates[sub_id] = (buy_price * circuit_import_share_kw, 0.0, circuit_kw)
                 self._last_cost_method[sub_id] = COST_METHOD_SHARED
-            else:
-                circuit_cost_rate = effective_price * circuit_kw
+        else:
+            for sub_id, circuit_kw in circuit_kws.items():
+                self._last_rates[sub_id] = (effective_price * circuit_kw, 0.0, circuit_kw)
                 self._last_cost_method[sub_id] = COST_METHOD_UNSHARED
-
-            self._last_rates[sub_id] = (circuit_cost_rate, 0.0, circuit_kw)
 
     def _read_float(self, entity_id: str | None) -> float | None:
         if not entity_id:
@@ -517,4 +539,5 @@ class EnergyLedgerCoordinator:
                 node_id: gap.isoformat() for node_id, gap in self._energy_gap_since.items() if gap is not None
             },
             "last_cost_method": dict(self._last_cost_method),
+            "savings_gap_since": self._savings_gap_since.isoformat() if self._savings_gap_since else None,
         }
