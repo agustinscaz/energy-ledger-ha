@@ -6,6 +6,8 @@ repintan cuando este avisa (async_add_listener), igual que con un DataUpdateCoor
 
 from __future__ import annotations
 
+import time
+
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -23,12 +25,23 @@ from .const import (
     DOMAIN,
     ENERGY_METHOD_METER,
     NODE_HOME,
+    PERIOD_DAY,
     PERIODS,
     SUBENTRY_TYPE_CIRCUIT,
 )
 from .coordinator import EnergyLedgerCoordinator, PeriodAccumulator
 
 DEFAULT_CURRENCY = "EUR"
+
+# El coordinator integra en cada evento de entrada (exactitud intacta), pero los sensores solo
+# escriben estado cuando el valor redondeado cambia Y ha pasado este mínimo desde la última
+# escritura. Sin esto, cada evento de potencia escribía los ~30 sensores (decenas de miles de
+# cambios de estado/día al recorder y escrituras al disco). Los cambios de período o de hueco de
+# datos (atributos) se escriben siempre al instante.
+MIN_WRITE_INTERVAL_SECONDS = {PERIOD_DAY: 60}
+DEFAULT_MIN_WRITE_INTERVAL_SECONDS = 300
+MONETARY_DECIMALS = 2
+ENERGY_DECIMALS = 3
 
 
 def _infer_currency(hass: HomeAssistant, price_entity_id: str) -> str:
@@ -103,9 +116,30 @@ class _LedgerSensorBase(SensorEntity):
         self._attr_translation_key = f"{kind}_{period}"
         self._attr_device_class = device_class
         self._remove_listener: callable | None = None
+        self._decimals = ENERGY_DECIMALS if device_class == SensorDeviceClass.ENERGY else MONETARY_DECIMALS
+        self._min_write_interval = MIN_WRITE_INTERVAL_SECONDS.get(period, DEFAULT_MIN_WRITE_INTERVAL_SECONDS)
+        self._last_write_monotonic: float | None = None
+        self._last_written_value: float | None = None
+        self._last_written_attrs: dict | None = None
 
     async def async_added_to_hass(self) -> None:
-        self._remove_listener = self.coordinator.async_add_listener(self.async_write_ha_state)
+        self._remove_listener = self.coordinator.async_add_listener(self._handle_coordinator_update)
+
+    def _handle_coordinator_update(self) -> None:
+        """Escribe estado solo si hay un cambio significativo (ver MIN_WRITE_INTERVAL_SECONDS)."""
+        value = self.native_value
+        attrs = self.extra_state_attributes
+        now = time.monotonic()
+        if self._last_write_monotonic is not None:
+            if attrs == self._last_written_attrs:
+                if value == self._last_written_value:
+                    return
+                if now - self._last_write_monotonic < self._min_write_interval:
+                    return
+        self._last_write_monotonic = now
+        self._last_written_value = value
+        self._last_written_attrs = attrs
+        self.async_write_ha_state()
 
     async def async_will_remove_from_hass(self) -> None:
         if self._remove_listener is not None:
@@ -118,7 +152,7 @@ class _LedgerSensorBase(SensorEntity):
     @property
     def native_value(self) -> float | None:
         acc = self._period_accumulator()
-        return round(acc.value, 4) if acc is not None else None
+        return round(acc.value, self._decimals) if acc is not None else None
 
     @property
     def extra_state_attributes(self) -> dict[str, float | str | None]:
@@ -229,7 +263,7 @@ class LedgerBalanceSensor(_LedgerSensorBase):
         compensation = node.compensation.get(self._period)
         if cost is None or compensation is None:
             return None
-        return round(compensation.value - cost.value, 4)
+        return round(compensation.value - cost.value, self._decimals)
 
     @property
     def extra_state_attributes(self) -> dict[str, float | str | None]:
