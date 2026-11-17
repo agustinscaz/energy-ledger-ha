@@ -36,9 +36,10 @@ DEFAULT_POSITIVE_IS_EXPORT = True
 BACKGROUND_UPDATE_INTERVAL_SECONDS = 60
 # Debounce de Store.async_delay_save (ver issue #10): con un circuito activo el sensor de
 # potencia puede actualizar cada pocos segundos, y sin debounce cada evento dispara una escritura
-# completa a disco. Un delay corto sigue sin perder nada real entre reinicios (lo único que le
-# importa a esta integración) sin escribir en cada tick.
-STORAGE_SAVE_DELAY_SECONDS = 10
+# completa a disco. Un delay moderado sigue sin perder nada real entre reinicios (lo único que le
+# importa a esta integración) sin escribir en cada tick. 300 s reduce el desgaste del NVMe; un apagado
+# limpio de HA vuelca el guardado pendiente (Store escucha FINAL_WRITE), solo un corte brusco pierde hasta 5 min.
+STORAGE_SAVE_DELAY_SECONDS = 300
 
 STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = f"{DOMAIN}_ledger"
